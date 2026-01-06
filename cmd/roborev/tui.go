@@ -63,6 +63,7 @@ type tuiTickMsg time.Time
 type tuiJobsMsg []storage.ReviewJob
 type tuiStatusMsg storage.DaemonStatus
 type tuiReviewMsg *storage.Review
+type tuiPromptMsg *storage.Review
 type tuiErrMsg error
 
 func newTuiModel(serverAddr string) tuiModel {
@@ -144,6 +145,26 @@ func (m tuiModel) fetchReview(jobID int64) tea.Cmd {
 	}
 }
 
+func (m tuiModel) fetchReviewForPrompt(jobID int64) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := http.Get(fmt.Sprintf("%s/api/review?job_id=%d", m.serverAddr, jobID))
+		if err != nil {
+			return tuiErrMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			return tuiErrMsg(fmt.Errorf("no review found"))
+		}
+
+		var review storage.Review
+		if err := json.NewDecoder(resp.Body).Decode(&review); err != nil {
+			return tuiErrMsg(err)
+		}
+		return tuiPromptMsg(&review)
+	}
+}
+
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -207,7 +228,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "p":
-			if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
+			if m.currentView == tuiViewQueue && len(m.jobs) > 0 {
+				job := m.jobs[m.selectedIdx]
+				if job.Status == storage.JobStatusDone {
+					// Fetch review and go directly to prompt view
+					return m, m.fetchReviewForPrompt(job.ID)
+				}
+			} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
 				m.currentView = tuiViewPrompt
 				m.promptScroll = 0
 			} else if m.currentView == tuiViewPrompt {
@@ -246,6 +273,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentReview = msg
 		m.currentView = tuiViewReview
 		m.reviewScroll = 0
+
+	case tuiPromptMsg:
+		m.currentReview = msg
+		m.currentView = tuiViewPrompt
+		m.promptScroll = 0
 
 	case tuiErrMsg:
 		m.err = msg
@@ -338,7 +370,7 @@ func (m tuiModel) renderQueueView() string {
 	}
 
 	// Help
-	b.WriteString(tuiHelpStyle.Render("up/down: navigate | enter: view review | q: quit"))
+	b.WriteString(tuiHelpStyle.Render("up/down: navigate | enter: review | p: prompt | q: quit"))
 
 	return b.String()
 }
