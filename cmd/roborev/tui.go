@@ -361,7 +361,7 @@ func (m tuiModel) renderQueueView() string {
 		b.WriteString("No jobs in queue\n")
 	} else {
 		// Header (with 2-char prefix to align with row selector)
-		header := fmt.Sprintf("  %-4s %-17s %-15s %-8s %-8s %-8s %s",
+		header := fmt.Sprintf("  %-4s %-17s %-15s %-8s %-8s %-19s %s",
 			"ID", "Ref", "Repo", "Agent", "Status", "Queued", "Elapsed")
 		b.WriteString(tuiStatusStyle.Render(header))
 		b.WriteString("\n")
@@ -433,8 +433,8 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob) string {
 		agent = agent[:8]
 	}
 
-	// Format enqueue time as relative (e.g., "2m ago")
-	enqueued := formatRelativeTime(job.EnqueuedAt)
+	// Format enqueue time as timestamp in local time
+	enqueued := job.EnqueuedAt.Local().Format("2006-01-02 15:04:05")
 
 	// Format elapsed time
 	elapsed := ""
@@ -467,21 +467,8 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob) string {
 		styledStatus += strings.Repeat(" ", padding)
 	}
 
-	return fmt.Sprintf("%-4d %-17s %-15s %-8s %s %-8s %s",
+	return fmt.Sprintf("%-4d %-17s %-15s %-8s %s %-19s %s",
 		job.ID, ref, repo, agent, styledStatus, enqueued, elapsed)
-}
-
-// formatRelativeTime formats a time as relative (e.g., "2m ago", "1h ago")
-func formatRelativeTime(t time.Time) string {
-	d := time.Since(t)
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	} else if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	} else if d < 24*time.Hour {
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 // wrapText wraps text to the specified width, preserving existing line breaks
