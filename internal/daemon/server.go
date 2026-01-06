@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -378,7 +380,7 @@ func (s *Server) handleAddressReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.db.MarkReviewAddressed(req.ReviewID, req.Addressed); err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "review not found")
 			return
 		}
