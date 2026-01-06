@@ -230,7 +230,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup":
 			pageSize := max(1, m.height-10)
 			if m.currentView == tuiViewQueue {
-				m.selectedIdx = max(0, m.selectedIdx-pageSize)
+				if len(m.jobs) > 0 {
+					m.selectedIdx = max(0, m.selectedIdx-pageSize)
+				}
 			} else if m.currentView == tuiViewReview {
 				m.reviewScroll = max(0, m.reviewScroll-pageSize)
 			} else if m.currentView == tuiViewPrompt {
@@ -240,7 +242,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgdown":
 			pageSize := max(1, m.height-10)
 			if m.currentView == tuiViewQueue {
-				m.selectedIdx = min(len(m.jobs)-1, m.selectedIdx+pageSize)
+				if len(m.jobs) > 0 {
+					m.selectedIdx = min(len(m.jobs)-1, m.selectedIdx+pageSize)
+				}
 			} else if m.currentView == tuiViewReview {
 				m.reviewScroll += pageSize
 			} else if m.currentView == tuiViewPrompt {
