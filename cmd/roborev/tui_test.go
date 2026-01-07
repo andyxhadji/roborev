@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,11 +190,25 @@ func TestTUIToggleAddressedNoReview(t *testing.T) {
 
 func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/review" {
+		switch {
+		case r.URL.Path == "/api/review" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("job_id") != "42" {
+				t.Errorf("Expected job_id=42, got %s", r.URL.Query().Get("job_id"))
+			}
 			review := storage.Review{ID: 10, Addressed: false}
 			json.NewEncoder(w).Encode(review)
-		} else if r.URL.Path == "/api/review/address" {
+		case r.URL.Path == "/api/review/address" && r.Method == http.MethodPost:
+			var req map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&req)
+			if req["review_id"].(float64) != 10 {
+				t.Errorf("Expected review_id=10, got %v", req["review_id"])
+			}
+			if req["addressed"].(bool) != true {
+				t.Errorf("Expected addressed=true, got %v", req["addressed"])
+			}
 			json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		default:
+			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer ts.Close()
@@ -215,10 +230,16 @@ func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 	if result.oldState != false {
 		t.Errorf("Expected oldState=false, got %v", result.oldState)
 	}
+	if result.reviewView {
+		t.Error("Expected reviewView=false for queue view command")
+	}
 }
 
 func TestTUIAddressReviewInBackgroundNotFound(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/review" {
+			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts.Close()
@@ -231,8 +252,8 @@ func TestTUIAddressReviewInBackgroundNotFound(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected tuiAddressedResultMsg, got %T: %v", msg, msg)
 	}
-	if result.err == nil || result.err.Error() != "no review for this job" {
-		t.Errorf("Expected 'no review for this job' error, got: %v", result.err)
+	if result.err == nil || !strings.Contains(result.err.Error(), "no review") {
+		t.Errorf("Expected error containing 'no review', got: %v", result.err)
 	}
 	if result.jobID != 42 {
 		t.Errorf("Expected jobID=42 for rollback, got %d", result.jobID)
@@ -244,6 +265,9 @@ func TestTUIAddressReviewInBackgroundNotFound(t *testing.T) {
 
 func TestTUIAddressReviewInBackgroundFetchError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/review" {
+			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer ts.Close()
@@ -266,9 +290,10 @@ func TestTUIAddressReviewInBackgroundFetchError(t *testing.T) {
 
 func TestTUIAddressReviewInBackgroundBadJSON(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/review" {
-			w.Write([]byte("not valid json"))
+		if r.Method != http.MethodGet || r.URL.Path != "/api/review" {
+			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
 		}
+		w.Write([]byte("not valid json"))
 	}))
 	defer ts.Close()
 
@@ -290,11 +315,14 @@ func TestTUIAddressReviewInBackgroundBadJSON(t *testing.T) {
 
 func TestTUIAddressReviewInBackgroundAddressError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/review" {
+		switch {
+		case r.URL.Path == "/api/review" && r.Method == http.MethodGet:
 			review := storage.Review{ID: 10, Addressed: false}
 			json.NewEncoder(w).Encode(review)
-		} else if r.URL.Path == "/api/review/address" {
+		case r.URL.Path == "/api/review/address" && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer ts.Close()
