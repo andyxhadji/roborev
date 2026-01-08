@@ -86,17 +86,23 @@ func (wp *WorkerPool) CancelJob(jobID int64) bool {
 	// Note: we release the lock before the DB call to avoid blocking other operations
 	job, err := wp.db.GetJobByID(jobID)
 	if err != nil {
+		// DB error - but job may have registered while we were trying to read
+		// Re-check runningJobs before giving up
+		wp.runningJobsMu.Lock()
+		if cancel, ok := wp.runningJobs[jobID]; ok {
+			wp.runningJobsMu.Unlock()
+			log.Printf("Canceling job %d (registered during failed DB check)", jobID)
+			cancel()
+			return true
+		}
+		wp.runningJobsMu.Unlock()
 		return false
 	}
 
 	// Accept jobs that are queued, running, OR canceled-but-claimed (race condition case)
 	// When db.CancelJob is called before workerPool.CancelJob, the status becomes 'canceled'
 	// but the worker may not have registered yet. We detect this via WorkerID being set.
-	isCancellable := job.Status == storage.JobStatusQueued ||
-		job.Status == storage.JobStatusRunning ||
-		(job.Status == storage.JobStatusCanceled && job.WorkerID != "")
-
-	if !isCancellable {
+	if !wp.isJobCancellable(job) {
 		return false
 	}
 
@@ -111,10 +117,25 @@ func (wp *WorkerPool) CancelJob(jobID int64) bool {
 		return true
 	}
 
+	// Re-verify job is still cancellable before adding to pendingCancels
+	// The job may have registered and finished during our DB lookup window
+	job, err = wp.db.GetJobByID(jobID)
+	if err != nil || !wp.isJobCancellable(job) {
+		// Job finished or became non-cancellable - don't add stale entry
+		return false
+	}
+
 	// Mark for pending cancellation
 	wp.pendingCancels[jobID] = true
 	log.Printf("Job %d not yet registered, marking for pending cancellation", jobID)
 	return true
+}
+
+// isJobCancellable returns true if the job is in a state that can be canceled
+func (wp *WorkerPool) isJobCancellable(job *storage.ReviewJob) bool {
+	return job.Status == storage.JobStatusQueued ||
+		job.Status == storage.JobStatusRunning ||
+		(job.Status == storage.JobStatusCanceled && job.WorkerID != "")
 }
 
 // registerRunningJob tracks a running job for potential cancellation.
