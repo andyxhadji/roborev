@@ -171,6 +171,9 @@ func (db *DB) migrate() error {
 		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 			return fmt.Errorf("disable foreign keys: %w", err)
 		}
+		// Ensure FKs are re-enabled even if we return early due to error
+		// This prevents returning a connection to the pool with FKs disabled
+		defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
 
 		// Recreate table with updated constraint in a transaction for safety
 		tx, err := conn.BeginTx(ctx, nil)
@@ -232,22 +235,24 @@ func (db *DB) migrate() error {
 			return fmt.Errorf("commit migration transaction: %w", err)
 		}
 
-		// Re-enable foreign keys on this connection
+		// Re-enable foreign keys explicitly before checking (defer will also run, harmlessly)
 		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
 			return fmt.Errorf("re-enable foreign keys: %w", err)
 		}
 
 		// Verify foreign key integrity after migration
-		// pragma_foreign_key_check returns rows for violations, so check if any exist
-		var hasViolation int
-		err = conn.QueryRowContext(ctx, `SELECT 1 FROM pragma_foreign_key_check LIMIT 1`).Scan(&hasViolation)
-		if err != nil && err != sql.ErrNoRows {
+		// Use PRAGMA foreign_key_check (not table-valued function) for older SQLite compatibility
+		rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+		if err != nil {
 			return fmt.Errorf("foreign key check failed: %w", err)
 		}
-		if err == nil {
+		defer rows.Close()
+		if rows.Next() {
 			return fmt.Errorf("foreign key violations detected after migration")
 		}
-		// sql.ErrNoRows means no violations, which is good
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("foreign key check iteration failed: %w", err)
+		}
 	}
 
 	return nil
