@@ -26,19 +26,21 @@ type WorkerPool struct {
 	wg            sync.WaitGroup
 
 	// Track running jobs for cancellation
-	runningJobs   map[int64]context.CancelFunc
-	runningJobsMu sync.Mutex
+	runningJobs    map[int64]context.CancelFunc
+	pendingCancels map[int64]bool // Jobs canceled before registered
+	runningJobsMu  sync.Mutex
 }
 
 // NewWorkerPool creates a new worker pool
 func NewWorkerPool(db *storage.DB, cfg *config.Config, numWorkers int) *WorkerPool {
 	return &WorkerPool{
-		db:            db,
-		cfg:           cfg,
-		promptBuilder: prompt.NewBuilder(db),
-		numWorkers:    numWorkers,
-		stopCh:        make(chan struct{}),
-		runningJobs:   make(map[int64]context.CancelFunc),
+		db:             db,
+		cfg:            cfg,
+		promptBuilder:  prompt.NewBuilder(db),
+		numWorkers:     numWorkers,
+		stopCh:         make(chan struct{}),
+		runningJobs:    make(map[int64]context.CancelFunc),
+		pendingCancels: make(map[int64]bool),
 	}
 }
 
@@ -66,24 +68,40 @@ func (wp *WorkerPool) ActiveWorkers() int {
 }
 
 // CancelJob cancels a running job by its ID, killing the subprocess.
-// Returns true if the job was found and canceled, false if not running.
+// Returns true if the job was found and canceled. If the job isn't registered
+// yet (race between claim and register), it's marked as pending cancellation.
 func (wp *WorkerPool) CancelJob(jobID int64) bool {
 	wp.runningJobsMu.Lock()
 	cancel, ok := wp.runningJobs[jobID]
+	if !ok {
+		// Job not registered yet - mark for cancellation when it registers
+		wp.pendingCancels[jobID] = true
+		wp.runningJobsMu.Unlock()
+		log.Printf("Job %d not yet registered, marking for pending cancellation", jobID)
+		return false
+	}
 	wp.runningJobsMu.Unlock()
 
-	if ok {
-		log.Printf("Canceling job %d", jobID)
-		cancel()
-		return true
-	}
-	return false
+	log.Printf("Canceling job %d", jobID)
+	cancel()
+	return true
 }
 
-// registerRunningJob tracks a running job for potential cancellation
+// registerRunningJob tracks a running job for potential cancellation.
+// If the job was already marked for cancellation (race condition), it
+// immediately cancels it.
 func (wp *WorkerPool) registerRunningJob(jobID int64, cancel context.CancelFunc) {
 	wp.runningJobsMu.Lock()
 	wp.runningJobs[jobID] = cancel
+
+	// Check if this job was canceled before we registered it
+	if wp.pendingCancels[jobID] {
+		delete(wp.pendingCancels, jobID)
+		wp.runningJobsMu.Unlock()
+		log.Printf("Job %d was pending cancellation, canceling now", jobID)
+		cancel()
+		return
+	}
 	wp.runningJobsMu.Unlock()
 }
 
@@ -91,6 +109,7 @@ func (wp *WorkerPool) registerRunningJob(jobID int64, cancel context.CancelFunc)
 func (wp *WorkerPool) unregisterRunningJob(jobID int64) {
 	wp.runningJobsMu.Lock()
 	delete(wp.runningJobs, jobID)
+	delete(wp.pendingCancels, jobID) // Clean up any stale pending cancel
 	wp.runningJobsMu.Unlock()
 }
 

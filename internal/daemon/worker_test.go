@@ -116,3 +116,99 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 	// Should have had some workers active (exact number depends on timing)
 	t.Logf("Peak active workers: %d", activeWorkers)
 }
+
+func TestWorkerPoolCancelRunningJob(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.MaxWorkers = 1
+
+	repo, _ := db.GetOrCreateRepo(tmpDir)
+	commit, _ := db.GetOrCreateCommit(repo.ID, "cancelsha", "Author", "Subject", time.Now())
+	job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancelsha", "test")
+
+	pool := NewWorkerPool(db, cfg, 1)
+	pool.Start()
+
+	// Wait for job to be claimed (status becomes running)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		j, _ := db.GetJobByID(job.ID)
+		if j.Status == storage.JobStatusRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Cancel the job via DB and worker pool
+	if err := db.CancelJob(job.ID); err != nil {
+		t.Fatalf("CancelJob failed: %v", err)
+	}
+	pool.CancelJob(job.ID)
+
+	// Wait for worker to react to cancellation
+	time.Sleep(500 * time.Millisecond)
+
+	pool.Stop()
+
+	// Verify job status is canceled
+	finalJob, _ := db.GetJobByID(job.ID)
+	if finalJob.Status != storage.JobStatusCanceled {
+		t.Errorf("Expected status 'canceled', got '%s'", finalJob.Status)
+	}
+
+	// Verify no review was stored
+	_, err = db.GetReviewByJobID(job.ID)
+	if err == nil {
+		t.Error("Expected no review for canceled job, but found one")
+	}
+}
+
+func TestWorkerPoolPendingCancellation(t *testing.T) {
+	// Test the race condition fix: cancel arrives before job is registered
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(db, cfg, 1)
+
+	// Don't start the pool yet - we want to test pending cancellation
+
+	// Mark a job as pending cancellation before it's registered
+	pool.CancelJob(42)
+
+	// Verify it's in pending cancels
+	pool.runningJobsMu.Lock()
+	if !pool.pendingCancels[42] {
+		t.Error("Job 42 should be in pendingCancels")
+	}
+	pool.runningJobsMu.Unlock()
+
+	// Now register the job - should immediately cancel
+	canceled := false
+	pool.registerRunningJob(42, func() { canceled = true })
+
+	if !canceled {
+		t.Error("Job should have been canceled immediately on registration")
+	}
+
+	// Verify it's been removed from pending cancels
+	pool.runningJobsMu.Lock()
+	if pool.pendingCancels[42] {
+		t.Error("Job 42 should have been removed from pendingCancels")
+	}
+	pool.runningJobsMu.Unlock()
+}
