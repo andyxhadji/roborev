@@ -81,9 +81,10 @@ type tuiAddressedResultMsg struct {
 	err        error
 }
 type tuiCancelResultMsg struct {
-	jobID    int64
-	oldState storage.JobStatus
-	err      error
+	jobID         int64
+	oldState      storage.JobStatus
+	oldFinishedAt *time.Time
+	err           error
 }
 type tuiErrMsg error
 
@@ -362,27 +363,27 @@ func (m *tuiModel) setJobStatus(jobID int64, status storage.JobStatus) {
 }
 
 // cancelJob sends a cancel request to the server
-func (m tuiModel) cancelJob(jobID int64, oldStatus storage.JobStatus) tea.Cmd {
+func (m tuiModel) cancelJob(jobID int64, oldStatus storage.JobStatus, oldFinishedAt *time.Time) tea.Cmd {
 	return func() tea.Msg {
 		reqBody, err := json.Marshal(map[string]interface{}{
 			"job_id": jobID,
 		})
 		if err != nil {
-			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, err: err}
+			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, oldFinishedAt: oldFinishedAt, err: err}
 		}
 		resp, err := m.client.Post(m.serverAddr+"/api/job/cancel", "application/json", bytes.NewReader(reqBody))
 		if err != nil {
-			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, err: err}
+			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, oldFinishedAt: oldFinishedAt, err: err}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNotFound {
-			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, err: fmt.Errorf("job not cancellable")}
+			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, oldFinishedAt: oldFinishedAt, err: fmt.Errorf("job not cancellable")}
 		}
 		if resp.StatusCode != http.StatusOK {
-			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, err: fmt.Errorf("cancel job: %s", resp.Status)}
+			return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, oldFinishedAt: oldFinishedAt, err: fmt.Errorf("cancel job: %s", resp.Status)}
 		}
-		return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, err: nil}
+		return tuiCancelResultMsg{jobID: jobID, oldState: oldStatus, oldFinishedAt: oldFinishedAt, err: nil}
 	}
 }
 
@@ -547,10 +548,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				job := &m.jobs[m.selectedIdx]
 				if job.Status == storage.JobStatusRunning || job.Status == storage.JobStatusQueued {
 					oldStatus := job.Status
+					oldFinishedAt := job.FinishedAt // Save for rollback
 					job.Status = storage.JobStatusCanceled // Optimistic update
 					now := time.Now()
 					job.FinishedAt = &now // Stop elapsed time from ticking
-					return m, m.cancelJob(job.ID, oldStatus)
+					return m, m.cancelJob(job.ID, oldStatus, oldFinishedAt)
 				}
 			}
 
@@ -643,8 +645,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiCancelResultMsg:
 		if msg.err != nil {
-			// Rollback optimistic update on error
-			m.setJobStatus(msg.jobID, msg.oldState)
+			// Rollback optimistic update on error (both status and finishedAt)
+			for i := range m.jobs {
+				if m.jobs[i].ID == msg.jobID {
+					m.jobs[i].Status = msg.oldState
+					m.jobs[i].FinishedAt = msg.oldFinishedAt
+					break
+				}
+			}
 			m.err = msg.err
 		}
 

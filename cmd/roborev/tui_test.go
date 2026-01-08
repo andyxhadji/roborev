@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/wesm/roborev/internal/storage"
 )
 
@@ -772,7 +773,8 @@ func TestTUICancelJobSuccess(t *testing.T) {
 	defer ts.Close()
 
 	m := newTuiModel(ts.URL)
-	cmd := m.cancelJob(42, storage.JobStatusRunning)
+	oldFinishedAt := time.Now().Add(-1 * time.Hour)
+	cmd := m.cancelJob(42, storage.JobStatusRunning, &oldFinishedAt)
 	msg := cmd()
 
 	result, ok := msg.(tuiCancelResultMsg)
@@ -788,6 +790,9 @@ func TestTUICancelJobSuccess(t *testing.T) {
 	if result.oldState != storage.JobStatusRunning {
 		t.Errorf("Expected oldState=running, got %s", result.oldState)
 	}
+	if result.oldFinishedAt == nil || !result.oldFinishedAt.Equal(oldFinishedAt) {
+		t.Errorf("Expected oldFinishedAt to be preserved")
+	}
 }
 
 func TestTUICancelJobNotFound(t *testing.T) {
@@ -798,7 +803,7 @@ func TestTUICancelJobNotFound(t *testing.T) {
 	defer ts.Close()
 
 	m := newTuiModel(ts.URL)
-	cmd := m.cancelJob(99, storage.JobStatusQueued)
+	cmd := m.cancelJob(99, storage.JobStatusQueued, nil)
 	msg := cmd()
 
 	result, ok := msg.(tuiCancelResultMsg)
@@ -811,24 +816,33 @@ func TestTUICancelJobNotFound(t *testing.T) {
 	if result.oldState != storage.JobStatusQueued {
 		t.Errorf("Expected oldState=queued for rollback, got %s", result.oldState)
 	}
+	if result.oldFinishedAt != nil {
+		t.Errorf("Expected oldFinishedAt=nil for queued job, got %v", result.oldFinishedAt)
+	}
 }
 
 func TestTUICancelRollbackOnError(t *testing.T) {
 	m := newTuiModel("http://localhost")
 
-	// Setup: running job
+	// Setup: running job with no FinishedAt (still running)
 	startTime := time.Now().Add(-5 * time.Minute)
 	m.jobs = []storage.ReviewJob{
-		{ID: 42, Status: storage.JobStatusRunning, StartedAt: &startTime},
+		{ID: 42, Status: storage.JobStatusRunning, StartedAt: &startTime, FinishedAt: nil},
 	}
 	m.selectedIdx = 0
 	m.selectedJobID = 42
 
-	// Simulate cancel error result - should rollback status
+	// Simulate the optimistic update that would have happened
+	now := time.Now()
+	m.jobs[0].Status = storage.JobStatusCanceled
+	m.jobs[0].FinishedAt = &now
+
+	// Simulate cancel error result - should rollback both status and FinishedAt
 	errResult := tuiCancelResultMsg{
-		jobID:    42,
-		oldState: storage.JobStatusRunning,
-		err:      fmt.Errorf("server error"),
+		jobID:         42,
+		oldState:      storage.JobStatusRunning,
+		oldFinishedAt: nil, // Was nil before optimistic update
+		err:           fmt.Errorf("server error"),
 	}
 
 	updated, _ := m.Update(errResult)
@@ -836,6 +850,9 @@ func TestTUICancelRollbackOnError(t *testing.T) {
 
 	if m2.jobs[0].Status != storage.JobStatusRunning {
 		t.Errorf("Expected status to rollback to 'running', got '%s'", m2.jobs[0].Status)
+	}
+	if m2.jobs[0].FinishedAt != nil {
+		t.Errorf("Expected FinishedAt to rollback to nil, got %v", m2.jobs[0].FinishedAt)
 	}
 	if m2.err == nil {
 		t.Error("Expected error to be set")
@@ -845,26 +862,40 @@ func TestTUICancelRollbackOnError(t *testing.T) {
 func TestTUICancelOptimisticUpdate(t *testing.T) {
 	m := newTuiModel("http://localhost")
 
-	// Setup: running job
+	// Setup: running job with no FinishedAt
 	startTime := time.Now().Add(-5 * time.Minute)
 	m.jobs = []storage.ReviewJob{
-		{ID: 42, Status: storage.JobStatusRunning, StartedAt: &startTime},
+		{ID: 42, Status: storage.JobStatusRunning, StartedAt: &startTime, FinishedAt: nil},
 	}
 	m.selectedIdx = 0
 	m.selectedJobID = 42
+	m.currentView = tuiViewQueue
 
-	// Directly test setJobStatus
-	m.setJobStatus(42, storage.JobStatusCanceled)
+	// Simulate pressing 'x' key
+	beforeUpdate := time.Now()
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m2 := updated.(tuiModel)
 
-	if m.jobs[0].Status != storage.JobStatusCanceled {
-		t.Errorf("Expected status 'canceled', got '%s'", m.jobs[0].Status)
+	// Should have optimistically set status to canceled
+	if m2.jobs[0].Status != storage.JobStatusCanceled {
+		t.Errorf("Expected status 'canceled', got '%s'", m2.jobs[0].Status)
+	}
+
+	// Should have set FinishedAt to stop elapsed time from ticking
+	if m2.jobs[0].FinishedAt == nil {
+		t.Error("Expected FinishedAt to be set during optimistic cancel")
+	} else if m2.jobs[0].FinishedAt.Before(beforeUpdate) {
+		t.Error("Expected FinishedAt to be set to current time")
+	}
+
+	// Should return a command (the cancel HTTP request)
+	if cmd == nil {
+		t.Error("Expected a command to be returned for the cancel request")
 	}
 }
 
 func TestTUICancelOnlyRunningOrQueued(t *testing.T) {
-	m := newTuiModel("http://localhost")
-
-	// Test that cancel is a no-op for done/failed jobs
+	// Test that pressing 'x' on done/failed/canceled jobs is a no-op
 	testCases := []storage.JobStatus{
 		storage.JobStatusDone,
 		storage.JobStatusFailed,
@@ -873,20 +904,32 @@ func TestTUICancelOnlyRunningOrQueued(t *testing.T) {
 
 	for _, status := range testCases {
 		t.Run(string(status), func(t *testing.T) {
+			m := newTuiModel("http://localhost")
+			finishedAt := time.Now().Add(-1 * time.Hour)
 			m.jobs = []storage.ReviewJob{
-				{ID: 1, Status: status},
+				{ID: 1, Status: status, FinishedAt: &finishedAt},
 			}
 			m.selectedIdx = 0
 			m.currentView = tuiViewQueue
 
-			// Simulate pressing 'x' - should return nil cmd for non-cancellable jobs
-			// We test this by checking the job status doesn't change
-			originalStatus := m.jobs[0].Status
-			m.setJobStatus(1, storage.JobStatusCanceled) // Simulate what would happen
-			m.setJobStatus(1, originalStatus)            // Revert for test
+			// Simulate pressing 'x' key
+			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+			m2 := updated.(tuiModel)
 
-			// The key test: pressing 'x' on done/failed jobs should not trigger cancel
-			// This is handled in the Update function's case "x" which checks status
+			// Status should not change
+			if m2.jobs[0].Status != status {
+				t.Errorf("Expected status to remain '%s', got '%s'", status, m2.jobs[0].Status)
+			}
+
+			// FinishedAt should not change
+			if m2.jobs[0].FinishedAt == nil || !m2.jobs[0].FinishedAt.Equal(finishedAt) {
+				t.Errorf("Expected FinishedAt to remain unchanged")
+			}
+
+			// No command should be returned (no HTTP request triggered)
+			if cmd != nil {
+				t.Errorf("Expected no command for non-cancellable job, got %v", cmd)
+			}
 		})
 	}
 }
