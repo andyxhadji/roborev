@@ -548,6 +548,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if job.Status == storage.JobStatusRunning || job.Status == storage.JobStatusQueued {
 					oldStatus := job.Status
 					job.Status = storage.JobStatusCanceled // Optimistic update
+					now := time.Now()
+					job.FinishedAt = &now // Stop elapsed time from ticking
 					return m, m.cancelJob(job.ID, oldStatus)
 				}
 			}
