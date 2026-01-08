@@ -358,3 +358,118 @@ func TestWorkerPoolCancelInvalidJob(t *testing.T) {
 	}
 	pool.runningJobsMu.Unlock()
 }
+
+func TestWorkerPoolCancelJobFinishedDuringWindow(t *testing.T) {
+	// Test that CancelJob doesn't add stale pendingCancels when job finishes
+	// during the DB lookup window (simulated by completing job before CancelJob)
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(db, cfg, 1)
+
+	// Create and claim a job
+	repo, err := db.GetOrCreateRepo(tmpDir)
+	if err != nil {
+		t.Fatalf("GetOrCreateRepo failed: %v", err)
+	}
+	commit, err := db.GetOrCreateCommit(repo.ID, "finish-window", "Author", "Subject", time.Now())
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit failed: %v", err)
+	}
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "finish-window", "test")
+	if err != nil {
+		t.Fatalf("EnqueueJob failed: %v", err)
+	}
+	_, err = db.ClaimJob("test-worker")
+	if err != nil {
+		t.Fatalf("ClaimJob failed: %v", err)
+	}
+
+	// Complete the job (simulates job finishing during DB lookup window)
+	if err := db.CompleteJob(job.ID, "test", "prompt", "output"); err != nil {
+		t.Fatalf("CompleteJob failed: %v", err)
+	}
+
+	// Verify job is now done
+	completedJob, err := db.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID failed: %v", err)
+	}
+	if completedJob.Status != storage.JobStatusDone {
+		t.Fatalf("Expected status 'done', got '%s'", completedJob.Status)
+	}
+
+	// CancelJob should return false because job is done
+	if pool.CancelJob(job.ID) {
+		t.Error("CancelJob should return false for completed job")
+	}
+
+	// Verify pendingCancels is empty (no stale entry)
+	pool.runningJobsMu.Lock()
+	if pool.pendingCancels[job.ID] {
+		t.Error("Completed job should not be added to pendingCancels")
+	}
+	pool.runningJobsMu.Unlock()
+}
+
+func TestWorkerPoolCancelJobRegisteredDuringCheck(t *testing.T) {
+	// Test that a job registered during DB checks gets canceled
+	// This simulates the race where job registers after initial runningJobs check
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(db, cfg, 1)
+
+	// Create and claim a job
+	repo, err := db.GetOrCreateRepo(tmpDir)
+	if err != nil {
+		t.Fatalf("GetOrCreateRepo failed: %v", err)
+	}
+	commit, err := db.GetOrCreateCommit(repo.ID, "register-during", "Author", "Subject", time.Now())
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit failed: %v", err)
+	}
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "register-during", "test")
+	if err != nil {
+		t.Fatalf("EnqueueJob failed: %v", err)
+	}
+	_, err = db.ClaimJob("test-worker")
+	if err != nil {
+		t.Fatalf("ClaimJob failed: %v", err)
+	}
+
+	// Pre-register the job with a cancel function
+	// This simulates the job registering between CancelJob's checks
+	canceled := false
+	pool.registerRunningJob(job.ID, func() { canceled = true })
+
+	// Now CancelJob should find it in runningJobs and cancel
+	if !pool.CancelJob(job.ID) {
+		t.Error("CancelJob should return true for registered job")
+	}
+
+	if !canceled {
+		t.Error("Job should have been canceled")
+	}
+
+	// Verify it's not in pendingCancels (was handled via runningJobs)
+	pool.runningJobsMu.Lock()
+	if pool.pendingCancels[job.ID] {
+		t.Error("Registered job should not be in pendingCancels")
+	}
+	pool.runningJobsMu.Unlock()
+}

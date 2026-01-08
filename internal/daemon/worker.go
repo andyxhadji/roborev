@@ -108,21 +108,32 @@ func (wp *WorkerPool) CancelJob(jobID int64) bool {
 
 	// Re-lock and check if job was registered while we were checking DB
 	wp.runningJobsMu.Lock()
-	defer wp.runningJobsMu.Unlock()
-
-	// Check again if it's now registered (worker registered while we did DB lookup)
 	if cancel, ok := wp.runningJobs[jobID]; ok {
+		wp.runningJobsMu.Unlock()
 		log.Printf("Canceling job %d (registered during DB check)", jobID)
 		cancel()
 		return true
 	}
+	wp.runningJobsMu.Unlock()
 
 	// Re-verify job is still cancellable before adding to pendingCancels
 	// The job may have registered and finished during our DB lookup window
+	// Do this outside the lock to avoid blocking other operations
 	job, err = wp.db.GetJobByID(jobID)
 	if err != nil || !wp.isJobCancellable(job) {
 		// Job finished or became non-cancellable - don't add stale entry
 		return false
+	}
+
+	// Final lock acquisition to set pendingCancels
+	wp.runningJobsMu.Lock()
+	defer wp.runningJobsMu.Unlock()
+
+	// Final check if job registered while we did the second DB lookup
+	if cancel, ok := wp.runningJobs[jobID]; ok {
+		log.Printf("Canceling job %d (registered during second DB check)", jobID)
+		cancel()
+		return true
 	}
 
 	// Mark for pending cancellation
