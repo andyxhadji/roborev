@@ -77,7 +77,9 @@ func ensureDaemon() error {
 		if err == nil {
 			resp.Body.Close()
 
-			// Check version match
+			// Check version match - restart if versions differ
+			// For dirty builds, also restart if daemon is non-dirty (newer clean build)
+			// but don't restart if both are the same dirty version
 			if info.Version != version.Version {
 				if verbose {
 					fmt.Printf("Daemon version mismatch (daemon: %s, cli: %s), restarting...\n", info.Version, version.Version)
@@ -980,12 +982,22 @@ func shortRef(ref string) string {
 }
 
 // generateHookContent creates the post-commit hook script content.
-// It prefers the baked absolute path for security, falls back to PATH if missing.
+// It bakes the path to the currently running binary for consistency.
+// Falls back to PATH lookup if the baked path becomes unavailable.
 func generateHookContent() string {
-	// Get current roborev absolute path
-	roborevPath, err := exec.LookPath("roborev")
-	if err != nil {
-		roborevPath = "roborev"
+	// Get path to the currently running binary (not just first in PATH)
+	roborevPath, err := os.Executable()
+	if err == nil {
+		// Resolve symlinks to get the real path
+		if resolved, err := filepath.EvalSymlinks(roborevPath); err == nil {
+			roborevPath = resolved
+		}
+	} else {
+		// Fallback to PATH lookup if os.Executable fails (shouldn't happen)
+		roborevPath, _ = exec.LookPath("roborev")
+		if roborevPath == "" {
+			roborevPath = "roborev"
+		}
 	}
 
 	// Prefer baked path (security), fall back to PATH only if baked is missing
@@ -993,8 +1005,8 @@ func generateHookContent() string {
 # RoboRev post-commit hook - auto-reviews every commit
 ROBOREV=%q
 if [ ! -x "$ROBOREV" ]; then
-    ROBOREV=$(command -v roborev 2>/dev/null) || exit 0
-    [ ! -x "$ROBOREV" ] && exit 0
+    ROBOREV=$(command -v roborev 2>/dev/null)
+    [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ] && exit 0
 fi
 "$ROBOREV" enqueue --quiet 2>/dev/null &
 `, roborevPath)

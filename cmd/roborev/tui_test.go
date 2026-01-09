@@ -483,8 +483,9 @@ func TestTUISelectionEmptyList(t *testing.T) {
 	updated, _ := m.Update(newJobs)
 	m = updated.(tuiModel)
 
-	if m.selectedIdx != 0 {
-		t.Errorf("Expected selectedIdx=0, got %d", m.selectedIdx)
+	// Empty list should have selectedIdx=-1 (no valid selection)
+	if m.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1, got %d", m.selectedIdx)
 	}
 	if m.selectedJobID != 0 {
 		t.Errorf("Expected selectedJobID=0, got %d", m.selectedJobID)
@@ -974,5 +975,1416 @@ func TestTUICancelOnlyRunningOrQueued(t *testing.T) {
 				t.Errorf("Expected no command for non-cancellable job, got %v", cmd)
 			}
 		})
+	}
+}
+
+// Tests for filter functionality
+
+func TestTUIFilterOpenModal(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a"},
+		{ID: 2, RepoName: "repo-b"},
+		{ID: 3, RepoName: "repo-a"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+
+	// Press 'f' to open filter modal
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewFilter {
+		t.Errorf("Expected tuiViewFilter, got %d", m2.currentView)
+	}
+	// filterRepos should be nil (loading state) until async fetch completes
+	if m2.filterRepos != nil {
+		t.Errorf("Expected filterRepos=nil (loading), got %d repos", len(m2.filterRepos))
+	}
+	if m2.filterSelectedIdx != 0 {
+		t.Errorf("Expected filterSelectedIdx=0 (All repos), got %d", m2.filterSelectedIdx)
+	}
+	if m2.filterSearch != "" {
+		t.Errorf("Expected empty filterSearch, got '%s'", m2.filterSearch)
+	}
+	if cmd == nil {
+		t.Error("Expected a fetch command to be returned")
+	}
+}
+
+func TestTUIFilterReposMsg(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+
+	// Simulate receiving repos from API
+	repos := []repoFilterItem{
+		{name: "repo-a", count: 2},
+		{name: "repo-b", count: 1},
+		{name: "repo-c", count: 1},
+	}
+	msg := tuiReposMsg{repos: repos, totalCount: 4}
+
+	updated, _ := m.Update(msg)
+	m2 := updated.(tuiModel)
+
+	// Should have: All repos (prepended), then the 3 repos from API
+	if len(m2.filterRepos) != 4 {
+		t.Fatalf("Expected 4 filter repos, got %d", len(m2.filterRepos))
+	}
+	if m2.filterRepos[0].name != "" || m2.filterRepos[0].count != 4 {
+		t.Errorf("Expected All repos with count 4, got name='%s' count=%d", m2.filterRepos[0].name, m2.filterRepos[0].count)
+	}
+	if m2.filterRepos[1].name != "repo-a" || m2.filterRepos[1].count != 2 {
+		t.Errorf("Expected repo-a with count 2, got name='%s' count=%d", m2.filterRepos[1].name, m2.filterRepos[1].count)
+	}
+	if m2.filterRepos[2].name != "repo-b" || m2.filterRepos[2].count != 1 {
+		t.Errorf("Expected repo-b with count 1, got name='%s' count=%d", m2.filterRepos[2].name, m2.filterRepos[2].count)
+	}
+	if m2.filterRepos[3].name != "repo-c" || m2.filterRepos[3].count != 1 {
+		t.Errorf("Expected repo-c with count 1, got name='%s' count=%d", m2.filterRepos[3].name, m2.filterRepos[3].count)
+	}
+}
+
+func TestTUIFilterSearch(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.filterRepos = []repoFilterItem{
+		{name: "", count: 10},
+		{name: "repo-alpha", count: 5},
+		{name: "repo-beta", count: 3},
+		{name: "something-else", count: 2},
+	}
+
+	// No search - all visible
+	visible := m.getVisibleFilterRepos()
+	if len(visible) != 4 {
+		t.Errorf("No search: expected 4 visible, got %d", len(visible))
+	}
+
+	// Search for "repo"
+	m.filterSearch = "repo"
+	visible = m.getVisibleFilterRepos()
+	if len(visible) != 3 { // All repos + repo-alpha + repo-beta
+		t.Errorf("Search 'repo': expected 3 visible, got %d", len(visible))
+	}
+
+	// Search for "alpha"
+	m.filterSearch = "alpha"
+	visible = m.getVisibleFilterRepos()
+	if len(visible) != 2 { // All repos + repo-alpha
+		t.Errorf("Search 'alpha': expected 2 visible, got %d", len(visible))
+	}
+
+	// Search for "xyz" - no matches
+	m.filterSearch = "xyz"
+	visible = m.getVisibleFilterRepos()
+	if len(visible) != 1 { // Only "All repos" always included
+		t.Errorf("Search 'xyz': expected 1 visible (All repos), got %d", len(visible))
+	}
+}
+
+func TestTUIFilterNavigation(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", count: 10},
+		{name: "repo-a", count: 5},
+		{name: "repo-b", count: 3},
+	}
+	m.filterSelectedIdx = 0
+
+	// Navigate down
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m2 := updated.(tuiModel)
+	if m2.filterSelectedIdx != 1 {
+		t.Errorf("j key: expected filterSelectedIdx=1, got %d", m2.filterSelectedIdx)
+	}
+
+	// Navigate down again
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m3 := updated.(tuiModel)
+	if m3.filterSelectedIdx != 2 {
+		t.Errorf("j key: expected filterSelectedIdx=2, got %d", m3.filterSelectedIdx)
+	}
+
+	// Navigate down at boundary - should stay at 2
+	updated, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m4 := updated.(tuiModel)
+	if m4.filterSelectedIdx != 2 {
+		t.Errorf("j key at boundary: expected filterSelectedIdx=2, got %d", m4.filterSelectedIdx)
+	}
+
+	// Navigate up
+	updated, _ = m4.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m5 := updated.(tuiModel)
+	if m5.filterSelectedIdx != 1 {
+		t.Errorf("k key: expected filterSelectedIdx=1, got %d", m5.filterSelectedIdx)
+	}
+}
+
+func TestTUIFilterSelectRepo(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a"},
+		{ID: 2, RepoName: "repo-b"},
+		{ID: 3, RepoName: "repo-a"},
+	}
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", rootPath: "", count: 3},
+		{name: "repo-a", rootPath: "/path/to/repo-a", count: 2},
+		{name: "repo-b", rootPath: "/path/to/repo-b", count: 1},
+	}
+	m.filterSelectedIdx = 1 // repo-a
+
+	// Press enter to select
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewQueue {
+		t.Errorf("Expected tuiViewQueue, got %d", m2.currentView)
+	}
+	if m2.activeRepoFilter != "/path/to/repo-a" {
+		t.Errorf("Expected activeRepoFilter='/path/to/repo-a', got '%s'", m2.activeRepoFilter)
+	}
+	// Selection is invalidated until refetch completes (prevents race condition)
+	if m2.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1 (invalidated pending refetch), got %d", m2.selectedIdx)
+	}
+}
+
+func TestTUIFilterClearWithEsc(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+	m.activeRepoFilter = "/path/to/repo-a"
+
+	// Press Esc to clear filter
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2 := updated.(tuiModel)
+
+	if m2.activeRepoFilter != "" {
+		t.Errorf("Expected activeRepoFilter to be cleared, got '%s'", m2.activeRepoFilter)
+	}
+	// Selection is invalidated until refetch completes (prevents race condition)
+	if m2.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1 (invalidated pending refetch), got %d", m2.selectedIdx)
+	}
+}
+
+func TestTUIFilterEscapeCloses(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.filterSearch = "test"
+	m.filterRepos = []repoFilterItem{{name: "", count: 1}}
+
+	// Press 'esc' to close without selecting
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewQueue {
+		t.Errorf("Expected tuiViewQueue, got %d", m2.currentView)
+	}
+	if m2.filterSearch != "" {
+		t.Errorf("Expected filterSearch to be cleared, got '%s'", m2.filterSearch)
+	}
+}
+
+func TestTUIFilterTypingSearch(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", count: 10},
+		{name: "repo-a", count: 5},
+	}
+	m.filterSelectedIdx = 1
+
+	// Type 'a'
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m2 := updated.(tuiModel)
+
+	if m2.filterSearch != "a" {
+		t.Errorf("Expected filterSearch='a', got '%s'", m2.filterSearch)
+	}
+	if m2.filterSelectedIdx != 0 {
+		t.Errorf("Expected filterSelectedIdx reset to 0, got %d", m2.filterSelectedIdx)
+	}
+
+	// Type 'b'
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m3 := updated.(tuiModel)
+
+	if m3.filterSearch != "ab" {
+		t.Errorf("Expected filterSearch='ab', got '%s'", m3.filterSearch)
+	}
+
+	// Backspace
+	updated, _ = m3.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m4 := updated.(tuiModel)
+
+	if m4.filterSearch != "a" {
+		t.Errorf("Expected filterSearch='a' after backspace, got '%s'", m4.filterSearch)
+	}
+}
+
+func TestTUIQueueNavigationWithFilter(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Jobs from two repos, interleaved
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 3, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 4, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 5, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+	m.activeRepoFilter = "/path/to/repo-a" // Filter to only repo-a jobs
+
+	// Navigate down - should skip repo-b jobs
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m2 := updated.(tuiModel)
+
+	// Should jump from ID=1 (idx 0) to ID=3 (idx 2), skipping ID=2 (repo-b)
+	if m2.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx=2, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 3 {
+		t.Errorf("Expected selectedJobID=3, got %d", m2.selectedJobID)
+	}
+
+	// Navigate down again - should go to ID=5
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 4 {
+		t.Errorf("Expected selectedIdx=4, got %d", m3.selectedIdx)
+	}
+	if m3.selectedJobID != 5 {
+		t.Errorf("Expected selectedJobID=5, got %d", m3.selectedJobID)
+	}
+
+	// Navigate up - should go back to ID=3
+	updated, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m4 := updated.(tuiModel)
+
+	if m4.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx=2, got %d", m4.selectedIdx)
+	}
+}
+
+func TestTUIGetVisibleJobs(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 3, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+
+	// No filter - all jobs visible
+	visible := m.getVisibleJobs()
+	if len(visible) != 3 {
+		t.Errorf("No filter: expected 3 visible, got %d", len(visible))
+	}
+
+	// Filter to repo-a
+	m.activeRepoFilter = "/path/to/repo-a"
+	visible = m.getVisibleJobs()
+	if len(visible) != 2 {
+		t.Errorf("Filter repo-a: expected 2 visible, got %d", len(visible))
+	}
+	if visible[0].ID != 1 || visible[1].ID != 3 {
+		t.Errorf("Expected IDs 1 and 3, got %d and %d", visible[0].ID, visible[1].ID)
+	}
+
+	// Filter to non-existent repo
+	m.activeRepoFilter = "/path/to/repo-xyz"
+	visible = m.getVisibleJobs()
+	if len(visible) != 0 {
+		t.Errorf("Filter repo-xyz: expected 0 visible, got %d", len(visible))
+	}
+}
+
+func TestTUIGetVisibleSelectedIdx(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 3, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+
+	// No filter, valid selection
+	m.selectedIdx = 1
+	if idx := m.getVisibleSelectedIdx(); idx != 1 {
+		t.Errorf("No filter, selectedIdx=1: expected 1, got %d", idx)
+	}
+
+	// No filter, selectedIdx=-1 returns -1
+	m.selectedIdx = -1
+	if idx := m.getVisibleSelectedIdx(); idx != -1 {
+		t.Errorf("No filter, selectedIdx=-1: expected -1, got %d", idx)
+	}
+
+	// With filter, selectedIdx=-1 returns -1
+	m.activeRepoFilter = "/path/to/repo-a"
+	m.selectedIdx = -1
+	if idx := m.getVisibleSelectedIdx(); idx != -1 {
+		t.Errorf("Filter active, selectedIdx=-1: expected -1, got %d", idx)
+	}
+
+	// With filter, selection matches visible job (job ID=3 is second visible in repo-a)
+	m.selectedIdx = 2 // index in m.jobs for job ID=3
+	if idx := m.getVisibleSelectedIdx(); idx != 1 {
+		t.Errorf("Filter active, selectedIdx=2 (ID=3): expected visible idx 1, got %d", idx)
+	}
+
+	// With filter, selection doesn't match filter - returns -1
+	m.selectedIdx = 1 // index in m.jobs for job ID=2 (repo-b, not visible)
+	if idx := m.getVisibleSelectedIdx(); idx != -1 {
+		t.Errorf("Filter active, selection not visible: expected -1, got %d", idx)
+	}
+}
+
+func TestTUIJobsRefreshWithFilter(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Initial state with filter active
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 3, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+	m.selectedIdx = 2
+	m.selectedJobID = 3
+	m.activeRepoFilter = "/path/to/repo-a"
+
+	// Jobs refresh - same jobs
+	newJobs := tuiJobsMsg([]storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+		{ID: 3, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	})
+
+	updated, _ := m.Update(newJobs)
+	m2 := updated.(tuiModel)
+
+	// Selection should be maintained
+	if m2.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx=2, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 3 {
+		t.Errorf("Expected selectedJobID=3, got %d", m2.selectedJobID)
+	}
+
+	// Now the selected job is removed
+	newJobs = tuiJobsMsg([]storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-b", RepoPath: "/path/to/repo-b"},
+	})
+
+	updated, _ = m2.Update(newJobs)
+	m3 := updated.(tuiModel)
+
+	// Should select first visible job (ID=1, repo-a)
+	if m3.selectedIdx != 0 {
+		t.Errorf("Expected selectedIdx=0, got %d", m3.selectedIdx)
+	}
+	if m3.selectedJobID != 1 {
+		t.Errorf("Expected selectedJobID=1, got %d", m3.selectedJobID)
+	}
+}
+
+func TestTUIFilterPreselectsCurrent(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.activeRepoFilter = "/path/to/repo-b" // Already filtering to repo-b
+
+	// Simulate receiving repos from API (should pre-select repo-b)
+	repos := []repoFilterItem{
+		{name: "repo-a", rootPath: "/path/to/repo-a", count: 1},
+		{name: "repo-b", rootPath: "/path/to/repo-b", count: 1},
+	}
+	msg := tuiReposMsg{repos: repos, totalCount: 2}
+
+	updated, _ := m.Update(msg)
+	m2 := updated.(tuiModel)
+
+	// filterRepos should be: All repos, repo-a, repo-b
+	// repo-b should be at index 2, which should be pre-selected
+	if m2.filterSelectedIdx != 2 {
+		t.Errorf("Expected filterSelectedIdx=2 (repo-b), got %d", m2.filterSelectedIdx)
+	}
+}
+
+func TestTUIFilterToZeroVisibleJobs(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Jobs only in repo-a
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", rootPath: "", count: 2},
+		{name: "repo-a", rootPath: "/path/to/repo-a", count: 2},
+		{name: "repo-b", rootPath: "/path/to/repo-b", count: 0}, // No jobs
+	}
+	m.filterSelectedIdx = 2 // Select repo-b
+
+	// Press enter to select repo-b (triggers refetch)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(tuiModel)
+
+	// Filter should be applied and a fetchJobs command should be returned
+	if m2.activeRepoFilter != "/path/to/repo-b" {
+		t.Errorf("Expected activeRepoFilter='/path/to/repo-b', got '%s'", m2.activeRepoFilter)
+	}
+	if cmd == nil {
+		t.Error("Expected fetchJobs command to be returned")
+	}
+	// Selection is invalidated until refetch completes (prevents race condition)
+	if m2.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1 pending refetch, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 0 {
+		t.Errorf("Expected selectedJobID=0 pending refetch, got %d", m2.selectedJobID)
+	}
+
+	// Simulate receiving empty jobs from API (repo-b has no jobs)
+	updated2, _ := m2.Update(tuiJobsMsg([]storage.ReviewJob{}))
+	m3 := updated2.(tuiModel)
+
+	// Now selection should be cleared since no jobs
+	if m3.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1 after receiving empty jobs, got %d", m3.selectedIdx)
+	}
+	if m3.selectedJobID != 0 {
+		t.Errorf("Expected selectedJobID=0 after receiving empty jobs, got %d", m3.selectedJobID)
+	}
+}
+
+func TestTUIRefreshWithZeroVisibleJobs(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Start with jobs in repo-a, filter active for repo-b
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+	m.activeRepoFilter = "/path/to/repo-b" // Filter to repo with no jobs
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	// Simulate jobs refresh
+	newJobs := []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+		{ID: 2, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
+	}
+	updated, _ := m.Update(tuiJobsMsg(newJobs))
+	m2 := updated.(tuiModel)
+
+	// Selection should be cleared since no jobs match filter
+	if m2.selectedIdx != -1 {
+		t.Errorf("Expected selectedIdx=-1 for zero visible jobs after refresh, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 0 {
+		t.Errorf("Expected selectedJobID=0 for zero visible jobs after refresh, got %d", m2.selectedJobID)
+	}
+}
+
+func TestTUIActionsNoOpWithZeroVisibleJobs(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Setup: filter active with no matching jobs
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a", Status: storage.JobStatusDone},
+	}
+	m.activeRepoFilter = "/path/to/repo-b"
+	m.selectedIdx = -1
+	m.selectedJobID = 0
+	m.currentView = tuiViewQueue
+
+	// Press enter - should be no-op
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(tuiModel)
+	if cmd != nil {
+		t.Error("Expected no command for enter with no visible jobs")
+	}
+	if m2.currentView != tuiViewQueue {
+		t.Errorf("Expected to stay in queue view, got %d", m2.currentView)
+	}
+
+	// Press 'x' (cancel) - should be no-op
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd != nil {
+		t.Error("Expected no command for cancel with no visible jobs")
+	}
+
+	// Press 'a' (address) - should be no-op
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd != nil {
+		t.Error("Expected no command for address with no visible jobs")
+	}
+}
+
+func TestTUIFilterViewSmallTerminal(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", count: 10},
+		{name: "repo-a", count: 5},
+		{name: "repo-b", count: 3},
+		{name: "repo-c", count: 2},
+	}
+	m.filterSelectedIdx = 0
+
+	t.Run("tiny terminal shows message", func(t *testing.T) {
+		m.height = 5 // Less than reservedLines (7)
+		output := m.renderFilterView()
+
+		if !strings.Contains(output, "(terminal too small)") {
+			t.Errorf("Expected 'terminal too small' message for height=5, got: %s", output)
+		}
+		// Should not contain any repo names
+		if strings.Contains(output, "repo-a") {
+			t.Error("Should not render repo names when terminal too small")
+		}
+	})
+
+	t.Run("exactly reservedLines shows no repos", func(t *testing.T) {
+		m.height = 7 // Exactly reservedLines, visibleRows = 0
+		output := m.renderFilterView()
+
+		if !strings.Contains(output, "(terminal too small)") {
+			t.Errorf("Expected 'terminal too small' message for height=7, got: %s", output)
+		}
+	})
+
+	t.Run("one row available", func(t *testing.T) {
+		m.height = 8 // reservedLines + 1 = visibleRows of 1
+		output := m.renderFilterView()
+
+		if strings.Contains(output, "(terminal too small)") {
+			t.Error("Should not show 'terminal too small' when 1 row available")
+		}
+		// Should show exactly one repo line (All repos)
+		if !strings.Contains(output, "All repos") {
+			t.Error("Should show 'All repos' when 1 row available")
+		}
+		// Should show scroll info since 4 repos > 1 visible row
+		if !strings.Contains(output, "[showing 1-1 of 4]") {
+			t.Errorf("Expected scroll info '[showing 1-1 of 4]', got: %s", output)
+		}
+	})
+
+	t.Run("fits all repos without scroll", func(t *testing.T) {
+		m.height = 15 // reservedLines(7) + 8 = visibleRows of 8, enough for 4 repos
+		output := m.renderFilterView()
+
+		// Should show all repos
+		if !strings.Contains(output, "All repos") {
+			t.Error("Should show 'All repos'")
+		}
+		if !strings.Contains(output, "repo-a") {
+			t.Error("Should show 'repo-a'")
+		}
+		if !strings.Contains(output, "repo-c") {
+			t.Error("Should show 'repo-c'")
+		}
+		// Should NOT show scroll info
+		if strings.Contains(output, "[showing") {
+			t.Error("Should not show scroll info when all repos fit")
+		}
+	})
+
+	t.Run("needs scrolling shows scroll info", func(t *testing.T) {
+		m.height = 9  // visibleRows = 2
+		m.filterSelectedIdx = 2 // Select repo-b
+		output := m.renderFilterView()
+
+		// Should show scroll info
+		if !strings.Contains(output, "[showing") {
+			t.Error("Expected scroll info when repos exceed visible rows")
+		}
+		// Selected item (repo-b) should be visible
+		if !strings.Contains(output, "repo-b") {
+			t.Error("Selected repo should be visible in scroll window")
+		}
+	})
+}
+
+func TestTUIFilterViewScrollWindow(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFilter
+	m.filterRepos = []repoFilterItem{
+		{name: "", count: 20},
+		{name: "repo-1", count: 5},
+		{name: "repo-2", count: 4},
+		{name: "repo-3", count: 3},
+		{name: "repo-4", count: 2},
+		{name: "repo-5", count: 1},
+	}
+	m.height = 10 // visibleRows = 3
+
+	t.Run("scroll keeps selected item visible at top", func(t *testing.T) {
+		m.filterSelectedIdx = 0
+		output := m.renderFilterView()
+
+		if !strings.Contains(output, "[showing 1-3 of 6]") {
+			t.Errorf("Expected '[showing 1-3 of 6]' for top selection, got: %s", output)
+		}
+	})
+
+	t.Run("scroll keeps selected item visible at bottom", func(t *testing.T) {
+		m.filterSelectedIdx = 5 // repo-5
+		output := m.renderFilterView()
+
+		if !strings.Contains(output, "[showing 4-6 of 6]") {
+			t.Errorf("Expected '[showing 4-6 of 6]' for bottom selection, got: %s", output)
+		}
+		if !strings.Contains(output, "repo-5") {
+			t.Error("repo-5 should be visible when selected")
+		}
+	})
+
+	t.Run("scroll centers selected item in middle", func(t *testing.T) {
+		m.filterSelectedIdx = 3 // repo-3
+		output := m.renderFilterView()
+
+		// With 3 visible rows and selecting item 3 (0-indexed), centering puts start at 2
+		if !strings.Contains(output, "repo-3") {
+			t.Error("repo-3 should be visible when selected")
+		}
+	})
+}
+
+// Tests for j/k and left/right review navigation
+
+func TestTUIReviewNavigationJNext(t *testing.T) {
+	// Test 'j' navigates to next viewable job (higher index) in review view
+	m := newTuiModel("http://localhost")
+
+	// Setup: 5 jobs, middle ones are queued/running (not viewable)
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusQueued},
+		{ID: 3, Status: storage.JobStatusRunning},
+		{ID: 4, Status: storage.JobStatusFailed},
+		{ID: 5, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 10, Job: &storage.ReviewJob{ID: 1}}
+	m.reviewScroll = 5 // Ensure scroll resets
+
+	// Press 'j' - should skip to job 4 (failed, viewable)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 3 {
+		t.Errorf("Expected selectedIdx=3 (job ID=4), got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 4 {
+		t.Errorf("Expected selectedJobID=4, got %d", m2.selectedJobID)
+	}
+	if m2.reviewScroll != 0 {
+		t.Errorf("Expected reviewScroll to reset to 0, got %d", m2.reviewScroll)
+	}
+	// For failed jobs, currentReview is set inline (no fetch command)
+	if m2.currentReview == nil {
+		t.Error("Expected currentReview to be set for failed job")
+	}
+	if cmd != nil {
+		t.Error("Expected no command for failed job (inline display)")
+	}
+}
+
+func TestTUIReviewNavigationKPrev(t *testing.T) {
+	// Test 'k' navigates to previous viewable job (lower index) in review view
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusQueued},
+		{ID: 3, Status: storage.JobStatusRunning},
+		{ID: 4, Status: storage.JobStatusFailed},
+		{ID: 5, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 4
+	m.selectedJobID = 5
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 50, Job: &storage.ReviewJob{ID: 5}}
+	m.reviewScroll = 10
+
+	// Press 'k' - should skip to job 4 (failed, viewable)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 3 {
+		t.Errorf("Expected selectedIdx=3 (job ID=4), got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 4 {
+		t.Errorf("Expected selectedJobID=4, got %d", m2.selectedJobID)
+	}
+	if m2.reviewScroll != 0 {
+		t.Errorf("Expected reviewScroll to reset to 0, got %d", m2.reviewScroll)
+	}
+}
+
+func TestTUIReviewNavigationLeftRight(t *testing.T) {
+	// Test left/right arrows mirror j/k in review view
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Job: &storage.ReviewJob{ID: 2}}
+
+	// Press 'left' - should navigate to next (higher index), like 'j'
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 2 {
+		t.Errorf("Left arrow: expected selectedIdx=2, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 3 {
+		t.Errorf("Left arrow: expected selectedJobID=3, got %d", m2.selectedJobID)
+	}
+	// Should trigger fetch for done job
+	if cmd == nil {
+		t.Error("Left arrow: expected fetch command for done job")
+	}
+
+	// Reset and test 'right' - should navigate to prev (lower index), like 'k'
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentReview = &storage.Review{ID: 20, Job: &storage.ReviewJob{ID: 2}}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 0 {
+		t.Errorf("Right arrow: expected selectedIdx=0, got %d", m3.selectedIdx)
+	}
+	if m3.selectedJobID != 1 {
+		t.Errorf("Right arrow: expected selectedJobID=1, got %d", m3.selectedJobID)
+	}
+	if cmd == nil {
+		t.Error("Right arrow: expected fetch command for done job")
+	}
+}
+
+func TestTUIReviewNavigationBoundaries(t *testing.T) {
+	// Test navigation at boundaries (first/last viewable job)
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusQueued}, // Not viewable
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 10, Job: &storage.ReviewJob{ID: 1}}
+
+	// Press 'k' at first viewable job - should be no-op
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 0 {
+		t.Errorf("Expected selectedIdx to remain 0 at boundary, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 1 {
+		t.Errorf("Expected selectedJobID to remain 1 at boundary, got %d", m2.selectedJobID)
+	}
+	if cmd != nil {
+		t.Error("Expected no command at boundary")
+	}
+
+	// Now at last viewable job
+	m.selectedIdx = 2
+	m.selectedJobID = 3
+	m.currentReview = &storage.Review{ID: 30, Job: &storage.ReviewJob{ID: 3}}
+
+	// Press 'j' at last viewable job - should be no-op
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx to remain 2 at boundary, got %d", m3.selectedIdx)
+	}
+	if m3.selectedJobID != 3 {
+		t.Errorf("Expected selectedJobID to remain 3 at boundary, got %d", m3.selectedJobID)
+	}
+	if cmd != nil {
+		t.Error("Expected no command at boundary")
+	}
+}
+
+func TestTUIReviewNavigationFailedJobInline(t *testing.T) {
+	// Test that navigating to a failed job displays error inline
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusFailed, Agent: "codex", Error: "something went wrong"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 10, Job: &storage.ReviewJob{ID: 1}}
+
+	// Press 'j' - should navigate to failed job and display inline
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 1 {
+		t.Errorf("Expected selectedIdx=1, got %d", m2.selectedIdx)
+	}
+	if m2.currentReview == nil {
+		t.Fatal("Expected currentReview to be set for failed job")
+	}
+	if m2.currentReview.Agent != "codex" {
+		t.Errorf("Expected agent='codex', got '%s'", m2.currentReview.Agent)
+	}
+	if !strings.Contains(m2.currentReview.Output, "something went wrong") {
+		t.Errorf("Expected output to contain error, got '%s'", m2.currentReview.Output)
+	}
+	// No fetch command for failed jobs - displayed inline
+	if cmd != nil {
+		t.Error("Expected no command for failed job (inline display)")
+	}
+}
+
+func TestTUIReviewStaleResponseIgnored(t *testing.T) {
+	// Test that stale review responses are ignored (race condition fix)
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2 // Currently viewing job 2
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Output: "Review for job 2", Job: &storage.ReviewJob{ID: 2}}
+
+	// Simulate a stale response arriving for job 1 (user navigated away)
+	staleMsg := tuiReviewMsg{
+		review: &storage.Review{ID: 10, Output: "Stale review for job 1", Job: &storage.ReviewJob{ID: 1}},
+		jobID:  1, // This doesn't match selectedJobID (2)
+	}
+
+	updated, _ := m.Update(staleMsg)
+	m2 := updated.(tuiModel)
+
+	// Should ignore the stale response
+	if m2.currentReview.Output != "Review for job 2" {
+		t.Errorf("Expected stale response to be ignored, got output: %s", m2.currentReview.Output)
+	}
+	if m2.currentReview.ID != 20 {
+		t.Errorf("Expected review ID to remain 20, got %d", m2.currentReview.ID)
+	}
+}
+
+func TestTUIReviewMsgWithMatchingJobID(t *testing.T) {
+	// Test that review responses with matching job ID are accepted
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue // Still in queue view, waiting for fetch
+
+	validMsg := tuiReviewMsg{
+		review: &storage.Review{ID: 10, Output: "New review", Job: &storage.ReviewJob{ID: 1}},
+		jobID:  1,
+	}
+
+	updated, _ := m.Update(validMsg)
+	m2 := updated.(tuiModel)
+
+	// Should accept the response and switch to review view
+	if m2.currentView != tuiViewReview {
+		t.Errorf("Expected to switch to review view, got %d", m2.currentView)
+	}
+	if m2.currentReview == nil || m2.currentReview.Output != "New review" {
+		t.Error("Expected currentReview to be updated")
+	}
+	if m2.reviewScroll != 0 {
+		t.Errorf("Expected reviewScroll to be 0, got %d", m2.reviewScroll)
+	}
+}
+
+func TestTUISelectionSyncInReviewView(t *testing.T) {
+	// Test that selectedIdx syncs with currentReview.Job.ID when jobs refresh
+	m := newTuiModel("http://localhost")
+
+	// Initial state: viewing review for job 2
+	m.jobs = []storage.ReviewJob{
+		{ID: 3, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 1, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Job: &storage.ReviewJob{ID: 2}}
+
+	// New job arrives at the top, shifting indices
+	newJobs := tuiJobsMsg([]storage.ReviewJob{
+		{ID: 4, Status: storage.JobStatusDone}, // New job at top
+		{ID: 3, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone}, // Now at index 2
+		{ID: 1, Status: storage.JobStatusDone},
+	})
+
+	updated, _ := m.Update(newJobs)
+	m2 := updated.(tuiModel)
+
+	// selectedIdx should sync with currentReview.Job.ID (2), now at index 2
+	if m2.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx=2 (synced with review job), got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 2 {
+		t.Errorf("Expected selectedJobID=2, got %d", m2.selectedJobID)
+	}
+}
+
+func TestTUIQueueViewNavigationUpDown(t *testing.T) {
+	// Test up/down/j/k navigation in queue view
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusQueued},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewQueue
+
+	// 'j' in queue view moves down (higher index)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 2 {
+		t.Errorf("j key: expected selectedIdx=2, got %d", m2.selectedIdx)
+	}
+	if m2.selectedJobID != 3 {
+		t.Errorf("j key: expected selectedJobID=3, got %d", m2.selectedJobID)
+	}
+
+	// 'k' in queue view moves up (lower index)
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 1 {
+		t.Errorf("k key: expected selectedIdx=1, got %d", m3.selectedIdx)
+	}
+}
+
+func TestTUIQueueViewArrowsMatchUpDown(t *testing.T) {
+	// Test that left/right in queue view work like k/j (up/down)
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewQueue
+
+	// 'left' in queue view should move down (like j)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 2 {
+		t.Errorf("Left arrow: expected selectedIdx=2, got %d", m2.selectedIdx)
+	}
+
+	// Reset
+	m2.selectedIdx = 1
+	m2.selectedJobID = 2
+
+	// 'right' in queue view should move up (like k)
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 0 {
+		t.Errorf("Right arrow: expected selectedIdx=0, got %d", m3.selectedIdx)
+	}
+}
+
+func TestTUIJobsRefreshDuringReviewNavigation(t *testing.T) {
+	// Test that jobs refresh during review navigation doesn't reset selection
+	// This tests the race condition fix: user navigates to job 3, but jobs refresh
+	// arrives before the review loads. Selection should stay on job 3, not revert
+	// to the currently displayed review's job (job 2).
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Output: "Review for job 2", Job: &storage.ReviewJob{ID: 2}}
+
+	// Simulate user navigating to next review (job 3)
+	// This updates selectedIdx and selectedJobID but doesn't update currentReview yet
+	m.selectedIdx = 2
+	m.selectedJobID = 3
+
+	// Before the review for job 3 arrives, a jobs refresh comes in
+	refreshedJobs := tuiJobsMsg([]storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	})
+
+	updated, _ := m.Update(refreshedJobs)
+	m2 := updated.(tuiModel)
+
+	// Selection should stay on job 3 (user's navigation intent), not revert to job 2
+	if m2.selectedJobID != 3 {
+		t.Errorf("Expected selectedJobID=3 (user's navigation), got %d", m2.selectedJobID)
+	}
+	if m2.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx=2 (job 3's index), got %d", m2.selectedIdx)
+	}
+
+	// currentReview should still be the old one (review for job 3 hasn't loaded)
+	if m2.currentReview.Job.ID != 2 {
+		t.Errorf("Expected currentReview to still be job 2, got job %d", m2.currentReview.Job.ID)
+	}
+
+	// Now when the review for job 3 arrives, it should be accepted
+	newReviewMsg := tuiReviewMsg{
+		review: &storage.Review{ID: 30, Output: "Review for job 3", Job: &storage.ReviewJob{ID: 3}},
+		jobID:  3,
+	}
+
+	updated, _ = m2.Update(newReviewMsg)
+	m3 := updated.(tuiModel)
+
+	if m3.currentReview.ID != 30 {
+		t.Errorf("Expected new review ID=30, got %d", m3.currentReview.ID)
+	}
+	if m3.currentReview.Output != "Review for job 3" {
+		t.Errorf("Expected new review output, got %s", m3.currentReview.Output)
+	}
+}
+
+func TestTUIEmptyRefreshWhileViewingReview(t *testing.T) {
+	// Test that transient empty jobs refresh doesn't break selection
+	// when viewing a review. Selection should restore to displayed review
+	// when jobs repopulate.
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Output: "Review for job 2", Job: &storage.ReviewJob{ID: 2}}
+
+	// Transient empty refresh arrives
+	emptyJobs := tuiJobsMsg([]storage.ReviewJob{})
+
+	updated, _ := m.Update(emptyJobs)
+	m2 := updated.(tuiModel)
+
+	// selectedJobID should be preserved (not cleared) while viewing a review
+	if m2.selectedJobID != 2 {
+		t.Errorf("Expected selectedJobID=2 preserved during empty refresh, got %d", m2.selectedJobID)
+	}
+
+	// Jobs repopulate
+	repopulatedJobs := tuiJobsMsg([]storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	})
+
+	updated, _ = m2.Update(repopulatedJobs)
+	m3 := updated.(tuiModel)
+
+	// Selection should restore to job 2 (the displayed review)
+	if m3.selectedJobID != 2 {
+		t.Errorf("Expected selectedJobID=2 after repopulate, got %d", m3.selectedJobID)
+	}
+	if m3.selectedIdx != 1 {
+		t.Errorf("Expected selectedIdx=1 (job 2's index), got %d", m3.selectedIdx)
+	}
+}
+
+func TestTUIEmptyRefreshSeedsFromCurrentReview(t *testing.T) {
+	// Test that if selectedJobID somehow becomes 0 while viewing a review,
+	// it gets seeded from the current review when jobs repopulate
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{}
+	m.selectedIdx = 0
+	m.selectedJobID = 0 // Somehow cleared
+	m.currentView = tuiViewReview
+	m.currentReview = &storage.Review{ID: 20, Output: "Review for job 2", Job: &storage.ReviewJob{ID: 2}}
+
+	// Jobs repopulate
+	repopulatedJobs := tuiJobsMsg([]storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	})
+
+	updated, _ := m.Update(repopulatedJobs)
+	m2 := updated.(tuiModel)
+
+	// Selection should be seeded from currentReview.Job.ID
+	if m2.selectedJobID != 2 {
+		t.Errorf("Expected selectedJobID=2 (seeded from currentReview), got %d", m2.selectedJobID)
+	}
+	if m2.selectedIdx != 1 {
+		t.Errorf("Expected selectedIdx=1 (job 2's index), got %d", m2.selectedIdx)
+	}
+}
+
+func TestTUICalculateColumnWidths(t *testing.T) {
+	// Test that column widths fit within terminal for usable sizes (>= 80)
+	// Narrower terminals may overflow - users should widen their terminal
+	tests := []struct {
+		name           string
+		termWidth      int
+		idWidth        int
+		expectOverflow bool // true if overflow is acceptable for this width
+	}{
+		{
+			name:           "wide terminal",
+			termWidth:      200,
+			idWidth:        3,
+			expectOverflow: false,
+		},
+		{
+			name:           "medium terminal",
+			termWidth:      100,
+			idWidth:        3,
+			expectOverflow: false,
+		},
+		{
+			name:           "standard terminal",
+			termWidth:      80,
+			idWidth:        3,
+			expectOverflow: false,
+		},
+		{
+			name:           "narrow terminal - overflow acceptable",
+			termWidth:      60,
+			idWidth:        3,
+			expectOverflow: true, // Fixed columns alone need ~48 chars
+		},
+		{
+			name:           "very narrow terminal - overflow expected",
+			termWidth:      40,
+			idWidth:        3,
+			expectOverflow: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := tuiModel{width: tt.termWidth}
+			widths := m.calculateColumnWidths(tt.idWidth)
+
+			// All columns must have positive widths
+			if widths.ref < 1 {
+				t.Errorf("ref width %d < 1", widths.ref)
+			}
+			if widths.repo < 1 {
+				t.Errorf("repo width %d < 1", widths.repo)
+			}
+			if widths.agent < 1 {
+				t.Errorf("agent width %d < 1", widths.agent)
+			}
+
+			// Fixed widths: ID (idWidth), Status (10), Queued (12), Elapsed (8), Addr'd (6)
+			// Plus spacing: 2 (prefix) + 7 spaces between columns
+			fixedWidth := 2 + tt.idWidth + 10 + 12 + 8 + 6 + 7
+			flexibleTotal := widths.ref + widths.repo + widths.agent
+			totalWidth := fixedWidth + flexibleTotal
+
+			if !tt.expectOverflow && totalWidth > tt.termWidth {
+				t.Errorf("total width %d exceeds terminal width %d", totalWidth, tt.termWidth)
+			}
+
+			// Even with overflow, flexible columns should be minimal
+			if tt.expectOverflow && flexibleTotal > 15 {
+				t.Errorf("narrow terminal should minimize flexible columns, got %d", flexibleTotal)
+			}
+		})
+	}
+}
+
+func TestTUICalculateColumnWidthsProportions(t *testing.T) {
+	// On wide terminals, columns should use higher minimums
+	m := tuiModel{width: 200}
+	widths := m.calculateColumnWidths(3)
+
+	if widths.ref < 10 {
+		t.Errorf("wide terminal ref width %d < 10", widths.ref)
+	}
+	if widths.repo < 15 {
+		t.Errorf("wide terminal repo width %d < 15", widths.repo)
+	}
+	if widths.agent < 10 {
+		t.Errorf("wide terminal agent width %d < 10", widths.agent)
+	}
+}
+
+func TestTUIRenderJobLineTruncation(t *testing.T) {
+	m := tuiModel{width: 80}
+	// Use a git range - shortRef truncates ranges to 17 chars max, then renderJobLine
+	// truncates further based on colWidths.ref. Use a range longer than 17 chars.
+	job := storage.ReviewJob{
+		ID:         1,
+		GitRef:     "abcdef1234567..ghijkl7890123", // 28 char range, shortRef -> 17 chars
+		RepoName:   "very-long-repository-name-that-exceeds-width",
+		Agent:      "super-long-agent-name",
+		Status:     storage.JobStatusDone,
+		EnqueuedAt: time.Now(),
+	}
+
+	// Use narrow column widths to force truncation
+	// ref=10 will truncate the 17-char shortRef output
+	colWidths := columnWidths{
+		ref:   10,
+		repo:  15,
+		agent: 10,
+	}
+
+	line := m.renderJobLine(job, false, 3, colWidths)
+
+	// Check that truncated values contain "..."
+	if !strings.Contains(line, "...") {
+		t.Errorf("Expected truncation with '...' in line: %s", line)
+	}
+
+	// The line should contain truncated versions, not full strings
+	// shortRef reduces "abcdef1234567..ghijkl7890123" to "abcdef1234567..gh" (17 chars)
+	// then renderJobLine truncates to colWidths.ref (10)
+	if strings.Contains(line, "abcdef1234567..gh") {
+		t.Error("Full git ref (after shortRef) should have been truncated")
+	}
+	if strings.Contains(line, "very-long-repository-name-that-exceeds-width") {
+		t.Error("Full repo name should have been truncated")
+	}
+	if strings.Contains(line, "super-long-agent-name") {
+		t.Error("Full agent name should have been truncated")
+	}
+}
+
+func TestTUIRenderJobLineLength(t *testing.T) {
+	// Test that rendered line length respects column widths
+	m := tuiModel{width: 100}
+	job := storage.ReviewJob{
+		ID:         123,
+		GitRef:     "abc1234..def5678901234567890", // Long range
+		RepoName:   "my-very-long-repository-name-here",
+		Agent:      "claude-code-agent",
+		Status:     storage.JobStatusDone,
+		EnqueuedAt: time.Now(),
+	}
+
+	idWidth := 4
+	colWidths := columnWidths{
+		ref:   12,
+		repo:  15,
+		agent: 10,
+	}
+
+	line := m.renderJobLine(job, false, idWidth, colWidths)
+
+	// Fixed widths: ID (idWidth=4), Status (10), Queued (12), Elapsed (8), Addr'd (varies)
+	// Plus spacing between columns
+	// The line should not be excessively long
+	// Note: line includes ANSI codes for status styling, so we check a reasonable max
+	maxExpectedLen := idWidth + colWidths.ref + colWidths.repo + colWidths.agent + 10 + 12 + 8 + 10 + 20 // generous margin for spacing and ANSI
+	if len(line) > maxExpectedLen {
+		t.Errorf("Line length %d exceeds expected max %d: %s", len(line), maxExpectedLen, line)
+	}
+
+	// Verify truncation happened - original values should not appear
+	if strings.Contains(line, "my-very-long-repository-name-here") {
+		t.Error("Repo name should have been truncated")
+	}
+	if strings.Contains(line, "claude-code-agent") {
+		t.Error("Agent name should have been truncated")
+	}
+}
+
+func TestTUIRenderJobLineNoTruncation(t *testing.T) {
+	m := tuiModel{width: 200}
+	job := storage.ReviewJob{
+		ID:         1,
+		GitRef:     "abc1234",
+		RepoName:   "myrepo",
+		Agent:      "test",
+		Status:     storage.JobStatusDone,
+		EnqueuedAt: time.Now(),
+	}
+
+	// Use wide column widths - no truncation needed
+	colWidths := columnWidths{
+		ref:   20,
+		repo:  20,
+		agent: 15,
+	}
+
+	line := m.renderJobLine(job, false, 3, colWidths)
+
+	// Short values should not be truncated
+	if strings.Contains(line, "...") {
+		t.Errorf("Short values should not be truncated: %s", line)
+	}
+
+	// Original values should appear
+	if !strings.Contains(line, "abc1234") {
+		t.Error("Git ref should appear untruncated")
+	}
+	if !strings.Contains(line, "myrepo") {
+		t.Error("Repo name should appear untruncated")
+	}
+	if !strings.Contains(line, "test") {
+		t.Error("Agent name should appear untruncated")
 	}
 }

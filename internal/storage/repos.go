@@ -60,3 +60,38 @@ func (db *DB) GetRepoByPath(rootPath string) (*Repo, error) {
 	repo.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	return &repo, nil
 }
+
+// RepoWithCount represents a repo with its total job count
+type RepoWithCount struct {
+	Name     string `json:"name"`
+	RootPath string `json:"root_path"`
+	Count    int    `json:"count"`
+}
+
+// ListReposWithReviewCounts returns all repos with their total job counts
+func (db *DB) ListReposWithReviewCounts() ([]RepoWithCount, int, error) {
+	// Query repos with their job counts (includes queued/running, not just completed reviews)
+	rows, err := db.Query(`
+		SELECT r.name, r.root_path, COUNT(rj.id) as job_count
+		FROM repos r
+		LEFT JOIN review_jobs rj ON rj.repo_id = r.id
+		GROUP BY r.id, r.name, r.root_path
+		ORDER BY r.name
+	`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var repos []RepoWithCount
+	totalCount := 0
+	for rows.Next() {
+		var rc RepoWithCount
+		if err := rows.Scan(&rc.Name, &rc.RootPath, &rc.Count); err != nil {
+			return nil, 0, err
+		}
+		repos = append(repos, rc)
+		totalCount += rc.Count
+	}
+	return repos, totalCount, rows.Err()
+}
