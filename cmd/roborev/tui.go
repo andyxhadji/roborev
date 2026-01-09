@@ -1581,8 +1581,8 @@ func (m tuiModel) renderLogsView() string {
 	if m.logsContent == "" {
 		b.WriteString("No logs available yet. Press 'l' to refresh.\n")
 	} else {
-		// Wrap text to terminal width (max 120 chars for logs)
-		wrapWidth := min(m.width-2, 120)
+		// Wrap text to terminal width minus padding
+		wrapWidth := max(80, m.width-4)
 		lines := wrapText(m.logsContent, wrapWidth)
 
 		visibleLines := m.height - 5 // Leave room for title and help
