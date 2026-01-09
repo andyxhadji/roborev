@@ -2179,3 +2179,130 @@ func TestTUIEmptyRefreshSeedsFromCurrentReview(t *testing.T) {
 		t.Errorf("Expected selectedIdx=1 (job 2's index), got %d", m2.selectedIdx)
 	}
 }
+
+func TestTUICalculateColumnWidths(t *testing.T) {
+	tests := []struct {
+		name          string
+		termWidth     int
+		idWidth       int
+		wantRefMin    int
+		wantRepoMin   int
+		wantAgentMin  int
+	}{
+		{
+			name:         "wide terminal distributes space proportionally",
+			termWidth:    200,
+			idWidth:      3,
+			wantRefMin:   30, // Should be much larger than minimums
+			wantRepoMin:  50,
+			wantAgentMin: 30,
+		},
+		{
+			name:         "narrow terminal uses minimum widths",
+			termWidth:    60,
+			idWidth:      3,
+			wantRefMin:   10, // Minimum ref width
+			wantRepoMin:  15, // Minimum repo width
+			wantAgentMin: 10, // Minimum agent width
+		},
+		{
+			name:         "very narrow terminal clamps to 30 available",
+			termWidth:    30,
+			idWidth:      3,
+			wantRefMin:   10,
+			wantRepoMin:  15,
+			wantAgentMin: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := tuiModel{width: tt.termWidth}
+			widths := m.calculateColumnWidths(tt.idWidth)
+
+			if widths.ref < tt.wantRefMin {
+				t.Errorf("ref width %d < minimum %d", widths.ref, tt.wantRefMin)
+			}
+			if widths.repo < tt.wantRepoMin {
+				t.Errorf("repo width %d < minimum %d", widths.repo, tt.wantRepoMin)
+			}
+			if widths.agent < tt.wantAgentMin {
+				t.Errorf("agent width %d < minimum %d", widths.agent, tt.wantAgentMin)
+			}
+		})
+	}
+}
+
+func TestTUIRenderJobLineTruncation(t *testing.T) {
+	m := tuiModel{width: 80}
+	job := storage.ReviewJob{
+		ID:         1,
+		GitRef:     "abcdef1234567890abcdef1234567890abcdef12", // 40 char SHA
+		RepoName:   "very-long-repository-name-that-exceeds-width",
+		Agent:      "super-long-agent-name",
+		Status:     storage.JobStatusDone,
+		EnqueuedAt: time.Now(),
+	}
+
+	// Use narrow column widths to force truncation
+	colWidths := columnWidths{
+		ref:   15,
+		repo:  15,
+		agent: 10,
+	}
+
+	line := m.renderJobLine(job, false, 3, colWidths)
+
+	// Check that truncated values contain "..."
+	if !strings.Contains(line, "...") {
+		t.Errorf("Expected truncation with '...' in line: %s", line)
+	}
+
+	// The line should contain truncated versions, not full strings
+	if strings.Contains(line, "abcdef1234567890abcdef1234567890abcdef12") {
+		t.Error("Full git ref should have been truncated")
+	}
+	if strings.Contains(line, "very-long-repository-name-that-exceeds-width") {
+		t.Error("Full repo name should have been truncated")
+	}
+	if strings.Contains(line, "super-long-agent-name") {
+		t.Error("Full agent name should have been truncated")
+	}
+}
+
+func TestTUIRenderJobLineNoTruncation(t *testing.T) {
+	m := tuiModel{width: 200}
+	job := storage.ReviewJob{
+		ID:         1,
+		GitRef:     "abc1234",
+		RepoName:   "myrepo",
+		Agent:      "test",
+		Status:     storage.JobStatusDone,
+		EnqueuedAt: time.Now(),
+	}
+
+	// Use wide column widths - no truncation needed
+	colWidths := columnWidths{
+		ref:   20,
+		repo:  20,
+		agent: 15,
+	}
+
+	line := m.renderJobLine(job, false, 3, colWidths)
+
+	// Short values should not be truncated
+	if strings.Contains(line, "...") {
+		t.Errorf("Short values should not be truncated: %s", line)
+	}
+
+	// Original values should appear
+	if !strings.Contains(line, "abc1234") {
+		t.Error("Git ref should appear untruncated")
+	}
+	if !strings.Contains(line, "myrepo") {
+		t.Error("Repo name should appear untruncated")
+	}
+	if !strings.Contains(line, "test") {
+		t.Error("Agent name should appear untruncated")
+	}
+}
