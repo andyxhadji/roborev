@@ -80,6 +80,10 @@ type tuiModel struct {
 	err             error
 	updateAvailable string // Latest version if update available, empty if up to date
 
+	// Pagination state
+	hasMore       bool // true if there are more jobs to load
+	loadingMore   bool // true if currently loading more jobs
+
 	// Filter modal state
 	filterRepos       []repoFilterItem // Available repos with counts
 	filterSelectedIdx int              // Currently highlighted repo in filter list
@@ -90,7 +94,11 @@ type tuiModel struct {
 }
 
 type tuiTickMsg time.Time
-type tuiJobsMsg []storage.ReviewJob
+type tuiJobsMsg struct {
+	jobs    []storage.ReviewJob
+	hasMore bool
+	append  bool // true to append to existing jobs, false to replace
+}
 type tuiStatusMsg storage.DaemonStatus
 type tuiReviewMsg struct {
 	review *storage.Review
@@ -117,7 +125,8 @@ type tuiCancelResultMsg struct {
 	err           error
 }
 type tuiErrMsg error
-type tuiUpdateCheckMsg string // Latest version if available, empty if up to date
+type tuiPaginationErrMsg struct{ err error } // Pagination-specific error (clears loadingMore)
+type tuiUpdateCheckMsg string  // Latest version if available, empty if up to date
 type tuiReposMsg struct {
 	repos      []repoFilterItem
 	totalCount int
@@ -153,12 +162,19 @@ func (m tuiModel) tick() tea.Cmd {
 
 func (m tuiModel) fetchJobs() tea.Cmd {
 	return func() tea.Msg {
-		// No limit (limit=0) when filtering to show full repo history, otherwise limit to 50
+		// Determine limit:
+		// - No limit (limit=0) when filtering to show full repo history
+		// - If we've paginated (more than 50 jobs), maintain current view size
+		// - Otherwise default to 50
 		var url string
 		if m.activeRepoFilter != "" {
 			url = fmt.Sprintf("%s/api/jobs?limit=0&repo=%s", m.serverAddr, neturl.QueryEscape(m.activeRepoFilter))
 		} else {
-			url = fmt.Sprintf("%s/api/jobs?limit=50", m.serverAddr)
+			limit := 50
+			if len(m.jobs) > 50 {
+				limit = len(m.jobs) // Maintain paginated view on refresh
+			}
+			url = fmt.Sprintf("%s/api/jobs?limit=%d", m.serverAddr, limit)
 		}
 		resp, err := m.client.Get(url)
 		if err != nil {
@@ -171,12 +187,42 @@ func (m tuiModel) fetchJobs() tea.Cmd {
 		}
 
 		var result struct {
-			Jobs []storage.ReviewJob `json:"jobs"`
+			Jobs    []storage.ReviewJob `json:"jobs"`
+			HasMore bool                `json:"has_more"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return tuiErrMsg(err)
 		}
-		return tuiJobsMsg(result.Jobs)
+		return tuiJobsMsg{jobs: result.Jobs, hasMore: result.HasMore, append: false}
+	}
+}
+
+func (m tuiModel) fetchMoreJobs() tea.Cmd {
+	return func() tea.Msg {
+		// Only fetch more when not filtering (filtered view loads all)
+		if m.activeRepoFilter != "" {
+			return nil
+		}
+		offset := len(m.jobs)
+		url := fmt.Sprintf("%s/api/jobs?limit=50&offset=%d", m.serverAddr, offset)
+		resp, err := m.client.Get(url)
+		if err != nil {
+			return tuiPaginationErrMsg{err: err}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return tuiPaginationErrMsg{err: fmt.Errorf("fetch more jobs: %s", resp.Status)}
+		}
+
+		var result struct {
+			Jobs    []storage.ReviewJob `json:"jobs"`
+			HasMore bool                `json:"has_more"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return tuiPaginationErrMsg{err: err}
+		}
+		return tuiJobsMsg{jobs: result.Jobs, hasMore: result.HasMore, append: true}
 	}
 }
 
@@ -779,6 +825,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if nextIdx >= 0 {
 					m.selectedIdx = nextIdx
 					m.updateSelectedJobID()
+				} else if m.hasMore && !m.loadingMore && m.activeRepoFilter == "" {
+					// At bottom with more jobs available - load them
+					m.loadingMore = true
+					return m, m.fetchMoreJobs()
 				}
 			} else if m.currentView == tuiViewReview {
 				m.reviewScroll++
@@ -795,6 +845,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if nextIdx >= 0 {
 					m.selectedIdx = nextIdx
 					m.updateSelectedJobID()
+				} else if m.hasMore && !m.loadingMore && m.activeRepoFilter == "" {
+					// At bottom with more jobs available - load them
+					m.loadingMore = true
+					return m, m.fetchMoreJobs()
 				}
 			} else if m.currentView == tuiViewReview {
 				// Navigate to next review (higher index)
@@ -842,14 +896,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			pageSize := max(1, m.height-10)
 			if m.currentView == tuiViewQueue {
 				// Move down by pageSize visible jobs
+				reachedEnd := false
 				for i := 0; i < pageSize; i++ {
 					nextIdx := m.findNextVisibleJob(m.selectedIdx)
 					if nextIdx < 0 {
+						reachedEnd = true
 						break
 					}
 					m.selectedIdx = nextIdx
 				}
 				m.updateSelectedJobID()
+				// If we hit the end, try to load more
+				if reachedEnd && m.hasMore && !m.loadingMore && m.activeRepoFilter == "" {
+					m.loadingMore = true
+					return m, m.fetchMoreJobs()
+				}
 			} else if m.currentView == tuiViewReview {
 				m.reviewScroll += pageSize
 			} else if m.currentView == tuiViewPrompt {
@@ -965,6 +1026,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentView == tuiViewQueue && m.activeRepoFilter != "" {
 				// Clear filter and refetch all jobs
 				m.activeRepoFilter = ""
+				// Reset to default 50-job view (clear jobs so fetchJobs uses limit=50)
+				m.jobs = nil
+				m.hasMore = false
 				// Invalidate selection until refetch completes
 				m.selectedIdx = -1
 				m.selectedJobID = 0
@@ -995,6 +1059,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tuiTickMsg:
+		// Skip job refresh while pagination is in flight to prevent race conditions
+		if m.loadingMore {
+			return m, tea.Batch(m.tick(), m.fetchStatus())
+		}
 		// Auto-refresh logs if viewing logs screen
 		if m.currentView == tuiViewLogs && m.logsJobID > 0 {
 			return m, tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus(), m.fetchLogs(m.logsJobID))
@@ -1002,7 +1070,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus())
 
 	case tuiJobsMsg:
-		m.jobs = msg
+		m.loadingMore = false
+		m.hasMore = msg.hasMore
+
+		if msg.append {
+			// Append mode: add new jobs to existing list
+			m.jobs = append(m.jobs, msg.jobs...)
+		} else {
+			// Replace mode: full refresh
+			m.jobs = msg.jobs
+		}
 
 		if len(m.jobs) == 0 {
 			m.selectedIdx = -1
@@ -1157,6 +1234,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logsScroll = 0
 		}
 
+	case tuiPaginationErrMsg:
+		m.err = msg.err
+		m.loadingMore = false // Clear loading state so user can retry pagination
+
 	case tuiErrMsg:
 		m.err = msg
 	}
@@ -1295,10 +1376,19 @@ func (m tuiModel) renderQueueView() string {
 		}
 
 		// Show scroll indicator if not all jobs visible
-		if len(visibleJobList) > visibleRows {
-			scrollInfo := fmt.Sprintf("[showing %d-%d of %d]", start+1, end, len(visibleJobList))
-			b.WriteString(tuiStatusStyle.Render(scrollInfo))
-			b.WriteString("\n")
+		if len(visibleJobList) > visibleRows || m.hasMore || m.loadingMore {
+			var scrollInfo string
+			if m.loadingMore {
+				scrollInfo = fmt.Sprintf("[showing %d-%d of %d] Loading more...", start+1, end, len(visibleJobList))
+			} else if m.hasMore && m.activeRepoFilter == "" {
+				scrollInfo = fmt.Sprintf("[showing %d-%d of %d+] scroll down to load more", start+1, end, len(visibleJobList))
+			} else if len(visibleJobList) > visibleRows {
+				scrollInfo = fmt.Sprintf("[showing %d-%d of %d]", start+1, end, len(visibleJobList))
+			}
+			if scrollInfo != "" {
+				b.WriteString(tuiStatusStyle.Render(scrollInfo))
+				b.WriteString("\n")
+			}
 		}
 	}
 

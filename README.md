@@ -75,6 +75,13 @@ Create `~/.roborev/config.toml`:
 default_agent = "codex"
 server_addr = "127.0.0.1:7373"
 max_workers = 4
+job_timeout = "10m"  # Per-job timeout (default: 10m)
+```
+
+Override the data directory with `ROBOREV_DATA_DIR`:
+
+```bash
+export ROBOREV_DATA_DIR=/custom/path  # Default: ~/.roborev
 ```
 
 ### Priority Order
@@ -122,17 +129,26 @@ The interactive terminal UI (`roborev tui`) provides a real-time view of the rev
 | `p` | View prompt |
 | `a` | Toggle addressed |
 | `x` | Cancel running/queued job |
+| `f` | Filter by repository |
+| `Esc` | Clear filter |
 | `q` | Quit |
+
+Show just reviews for a single project via the filter modal with `f`
+
+<img src="docs/screenshots/tui-filter.png" width="75%" alt="Filter Modal">
 
 **Review/Prompt View:**
 
 | Key | Action |
 |-----|--------|
 | `↑`/`k`, `↓`/`j` | Scroll content |
+| `←`/`h`, `→`/`l` | Previous/next review |
 | `PgUp`, `PgDn` | Page through content |
 | `a` | Toggle addressed |
 | `p` | Switch between review/prompt |
 | `Esc`, `q` | Back to queue |
+
+<img src="docs/screenshots/tui-review.png" width="75%" alt="Review View">
 
 ## Architecture
 
