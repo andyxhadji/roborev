@@ -1563,20 +1563,31 @@ func (m tuiModel) renderPromptView() string {
 func (m tuiModel) renderLogsView() string {
 	var b strings.Builder
 
-	// Find the job for the title
-	var jobRef string
-	for _, job := range m.jobs {
+	// Find the job for the title and additional info
+	var currentJob *storage.ReviewJob
+	for i, job := range m.jobs {
 		if job.ID == m.logsJobID {
-			jobRef = shortRef(job.GitRef)
+			currentJob = &m.jobs[i]
 			break
 		}
 	}
 
-	title := fmt.Sprintf("Logs: Job %d", m.logsJobID)
-	if jobRef != "" {
-		title = fmt.Sprintf("Logs: %s (Job %d)", jobRef, m.logsJobID)
+	if currentJob != nil {
+		ref := shortRef(currentJob.GitRef)
+		repoStr := ""
+		if currentJob.RepoName != "" {
+			repoStr = currentJob.RepoName + " "
+		}
+		title := fmt.Sprintf("Logs: Job #%d %s%s (%s)", m.logsJobID, repoStr, ref, currentJob.Agent)
+		b.WriteString(tuiTitleStyle.Render(title))
+		b.WriteString("\n")
+		if currentJob.CommitSubject != "" {
+			b.WriteString(tuiStatusStyle.Render(currentJob.CommitSubject))
+		}
+	} else {
+		title := fmt.Sprintf("Logs: Job %d", m.logsJobID)
+		b.WriteString(tuiTitleStyle.Render(title))
 	}
-	b.WriteString(tuiTitleStyle.Render(title))
 	b.WriteString("\n")
 
 	if m.logsContent == "" {
