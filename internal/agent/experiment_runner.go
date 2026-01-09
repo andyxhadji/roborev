@@ -284,13 +284,26 @@ func (a *ExperimentRunnerAgent) parseEvaluationDetails(output string) string {
 
 	for _, line := range lines {
 		lower := strings.ToLower(line)
+		trimmed := strings.TrimSpace(line)
+
+		// Check if this is a "=== Section ===" header
+		isHeaderSection := strings.HasPrefix(trimmed, "=== ") && strings.HasSuffix(trimmed, " ===")
+
 		// Start capturing evaluation sections
 		if strings.Contains(lower, "classification report") ||
 			strings.Contains(lower, "confusion matrix") ||
 			strings.Contains(lower, "evaluation results") ||
 			strings.Contains(lower, "test results") ||
 			strings.Contains(lower, "validation results") ||
-			strings.Contains(lower, "evaluating cohort") {
+			strings.Contains(lower, "evaluating cohort") ||
+			isHeaderSection {
+
+			// If we were already in a section, save it first
+			if inEvalSection && len(evalLines) > 1 {
+				details = append(details, strings.Join(evalLines, "\n"))
+				evalLines = []string{}
+			}
+
 			inEvalSection = true
 			evalLines = append(evalLines, line)
 			continue
@@ -303,15 +316,7 @@ func (a *ExperimentRunnerAgent) parseEvaluationDetails(output string) string {
 			               (strings.Contains(line, "---") && strings.Contains(line, "-")) ||
 			               regexp.MustCompile(`^\s*[a-zA-Z_]+\s*\|`).MatchString(line)
 
-			// Also check for "=== " section headers which signal end of eval section
-			isNewSection := strings.HasPrefix(strings.TrimSpace(line), "=== ")
-
-			if isNewSection && len(evalLines) > 1 {
-				// End of section due to new section header
-				details = append(details, strings.Join(evalLines, "\n"))
-				evalLines = []string{}
-				inEvalSection = false
-			} else if strings.TrimSpace(line) == "" && len(evalLines) > 3 && !isTableLine {
+			if strings.TrimSpace(line) == "" && len(evalLines) > 3 && !isTableLine {
 				// End of section due to empty line (but not if we're in a table)
 				details = append(details, strings.Join(evalLines, "\n"))
 				evalLines = []string{}
