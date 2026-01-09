@@ -160,11 +160,6 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 		if metrics != "" {
 			result.WriteString(fmt.Sprintf("\n### Metrics\n%s\n", metrics))
 		}
-		// Add evaluation details section
-		evalDetails := a.parseEvaluationDetails(output)
-		if evalDetails != "" {
-			result.WriteString(fmt.Sprintf("\n### Evaluation Details\n%s\n", evalDetails))
-		}
 	}
 
 	return result.String()
@@ -367,12 +362,6 @@ func truncateOutput(output string, maxLines int) string {
 
 func (a *ExperimentRunnerAgent) formatOutput(files []string, experiments []string, results []string) string {
 	var output strings.Builder
-
-	output.WriteString("# Experiment Results\n\n")
-	output.WriteString("## Changes Detected\n")
-	output.WriteString(summarizeChanges(files))
-	output.WriteString(fmt.Sprintf("\n**Running**: %s\n\n", strings.Join(experiments, ", ")))
-	output.WriteString("---\n\n")
 
 	for _, result := range results {
 		output.WriteString(result)
