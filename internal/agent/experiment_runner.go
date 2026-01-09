@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -49,6 +51,29 @@ func (a *ExperimentRunnerAgent) Review(ctx context.Context, repoPath, commitSHA,
 	return a.formatOutput(files, experiments, results), nil
 }
 
+// getLogFile returns a file handle for writing live logs
+func (a *ExperimentRunnerAgent) getLogFile(repoPath string) *os.File {
+	logDir := filepath.Join(os.TempDir(), "roborev-logs")
+	os.MkdirAll(logDir, 0755)
+
+	// Use repo name as part of log filename for uniqueness
+	repoName := filepath.Base(repoPath)
+	logPath := filepath.Join(logDir, repoName+".log")
+
+	f, err := os.Create(logPath)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// GetLogPath returns the path to the log file for a repo (used by API)
+func GetLogPath(repoPath string) string {
+	logDir := filepath.Join(os.TempDir(), "roborev-logs")
+	repoName := filepath.Base(repoPath)
+	return filepath.Join(logDir, repoName+".log")
+}
+
 func (a *ExperimentRunnerAgent) detectExperiments(files []string) []string {
 	// Only run one experiment at a time to avoid timeout/resource issues
 	// Priority: new experiment file > modified experiment file > baseline (default)
@@ -71,17 +96,30 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+
+	// Also write to log file for live viewing
+	logFile := a.getLogFile(repoPath)
+	if logFile != nil {
+		defer logFile.Close()
+		cmd.Stdout = io.MultiWriter(&stdout, logFile)
+		cmd.Stderr = io.MultiWriter(&stderr, logFile)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
 
 	err := cmd.Run()
 
 	output := stdout.String()
 	errOutput := stderr.String()
 
-	// Parse MLFlow run ID and experiment ID from output
-	runID, experimentID := a.parseMLFlowInfo(output + errOutput)
-	mlflowURL := a.constructMLFlowURL(runID, experimentID)
+	// Parse MLFlow URL - try direct URL first, then construct from run/experiment IDs
+	combinedOutput := output + errOutput
+	mlflowURL := a.parseMLFlowURL(combinedOutput)
+	if mlflowURL == "" {
+		runID, experimentID := a.parseMLFlowInfo(combinedOutput)
+		mlflowURL = a.constructMLFlowURL(runID, experimentID)
+	}
 
 	// Parse metrics (look for F1, precision, recall patterns)
 	metrics := a.parseMetrics(output)
@@ -117,10 +155,15 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 	} else {
 		result.WriteString("**Status**: Success\n")
 		if mlflowURL != "" {
-			result.WriteString(fmt.Sprintf("**MLFlow Run**: %s\n", mlflowURL))
+			result.WriteString(fmt.Sprintf("\n**MLFlow Experiment**: %s\n", mlflowURL))
 		}
 		if metrics != "" {
 			result.WriteString(fmt.Sprintf("\n### Metrics\n%s\n", metrics))
+		}
+		// Add evaluation details section
+		evalDetails := a.parseEvaluationDetails(output)
+		if evalDetails != "" {
+			result.WriteString(fmt.Sprintf("\n### Evaluation Details\n%s\n", evalDetails))
 		}
 	}
 
@@ -128,11 +171,12 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 }
 
 func (a *ExperimentRunnerAgent) parseMLFlowInfo(output string) (runID, experimentID string) {
-	// Look for run_id patterns in output
+	// Look for run_id patterns in output (supports both 32-char hex and UUID formats)
 	runPatterns := []string{
-		`run_id[:\s=]+([a-f0-9]{32})`,
-		`mlflow\.run_id[:\s=]+([a-f0-9]{32})`,
-		`Run ID: ([a-f0-9]{32})`,
+		`Run ID: ([a-f0-9-]{32,36})`,
+		`MLflow run: ([a-f0-9]{32})`,
+		`run_id[:\s=]+([a-f0-9-]{32,36})`,
+		`mlflow\.run_id[:\s=]+([a-f0-9-]{32,36})`,
 	}
 	for _, pattern := range runPatterns {
 		re := regexp.MustCompile(pattern)
@@ -144,8 +188,9 @@ func (a *ExperimentRunnerAgent) parseMLFlowInfo(output string) (runID, experimen
 
 	// Look for experiment_id patterns
 	expPatterns := []string{
-		`experiment_id[:\s=]+(\d+)`,
 		`Experiment ID: (\d+)`,
+		`experiment_id[:\s=]+(\d+)`,
+		`/experiments/(\d+)/runs/`,
 	}
 	for _, pattern := range expPatterns {
 		re := regexp.MustCompile(pattern)
@@ -156,6 +201,29 @@ func (a *ExperimentRunnerAgent) parseMLFlowInfo(output string) (runID, experimen
 	}
 
 	return runID, experimentID
+}
+
+// parseMLFlowURL extracts a direct MLFlow URL from output if available
+func (a *ExperimentRunnerAgent) parseMLFlowURL(output string) string {
+	// Look for direct URL patterns in output
+	// Match URLs ending with /experiments/{id}/runs/{run_id} or /#/experiments/{id}/runs/{run_id}
+	urlPatterns := []string{
+		`Databricks experiment URL: (https://[^\s]+)`,
+		`View run [^\s]+ at: (https://[^\s]+)`,
+		`MLFlow URL: (https://[^\s]+)`,
+	}
+	for _, pattern := range urlPatterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(output); len(matches) > 1 {
+			// Clean any trailing newlines or whitespace from the URL
+			url := strings.TrimSpace(matches[1])
+			// Verify it looks like an MLFlow URL
+			if strings.Contains(url, "/experiments/") && strings.Contains(url, "/runs/") {
+				return url
+			}
+		}
+	}
+	return ""
 }
 
 func (a *ExperimentRunnerAgent) constructMLFlowURL(runID, experimentID string) string {
@@ -179,14 +247,23 @@ func (a *ExperimentRunnerAgent) parseMetrics(output string) string {
 	var metrics []string
 
 	patterns := map[string]*regexp.Regexp{
-		"F1":        regexp.MustCompile(`[Ff]1[:\s]+([0-9.]+)`),
-		"Precision": regexp.MustCompile(`[Pp]recision[:\s]+([0-9.]+)`),
-		"Recall":    regexp.MustCompile(`[Rr]ecall[:\s]+([0-9.]+)`),
+		"F1":        regexp.MustCompile(`[Ff]1[_\-\s]*[Ss]core[:\s=]+([0-9.]+)|[Ff]1[:\s=]+([0-9.]+)`),
+		"Precision": regexp.MustCompile(`[Pp]recision[:\s=]+([0-9.]+)`),
+		"Recall":    regexp.MustCompile(`[Rr]ecall[:\s=]+([0-9.]+)`),
+		"Accuracy":  regexp.MustCompile(`[Aa]ccuracy[:\s=]+([0-9.]+)`),
+		"AUC":       regexp.MustCompile(`[Aa][Uu][Cc][:\s=]+([0-9.]+)`),
+		"Loss":      regexp.MustCompile(`[Ll]oss[:\s=]+([0-9.]+)`),
 	}
 
 	for name, pattern := range patterns {
 		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
-			metrics = append(metrics, fmt.Sprintf("- %s: %s", name, matches[1]))
+			// Find first non-empty capture group
+			for _, m := range matches[1:] {
+				if m != "" {
+					metrics = append(metrics, fmt.Sprintf("- %s: %s", name, m))
+					break
+				}
+			}
 		}
 	}
 
@@ -194,6 +271,82 @@ func (a *ExperimentRunnerAgent) parseMetrics(output string) string {
 		return ""
 	}
 	return strings.Join(metrics, "\n")
+}
+
+// parseEvaluationDetails extracts detailed evaluation information from output
+func (a *ExperimentRunnerAgent) parseEvaluationDetails(output string) string {
+	var details []string
+
+	// Look for confusion matrix or classification report sections
+	lines := strings.Split(output, "\n")
+	inEvalSection := false
+	evalLines := []string{}
+
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		// Start capturing evaluation sections
+		if strings.Contains(lower, "classification report") ||
+			strings.Contains(lower, "confusion matrix") ||
+			strings.Contains(lower, "evaluation results") ||
+			strings.Contains(lower, "test results") ||
+			strings.Contains(lower, "validation results") ||
+			strings.Contains(lower, "evaluating cohort") {
+			inEvalSection = true
+			evalLines = append(evalLines, line)
+			continue
+		}
+
+		// Continue capturing if in section (until empty line or new section)
+		if inEvalSection {
+			// Check if line looks like a markdown table row or separator
+			isTableLine := strings.Contains(line, "|") ||
+			               (strings.Contains(line, "---") && strings.Contains(line, "-")) ||
+			               regexp.MustCompile(`^\s*[a-zA-Z_]+\s*\|`).MatchString(line)
+
+			// Also check for "=== " section headers which signal end of eval section
+			isNewSection := strings.HasPrefix(strings.TrimSpace(line), "=== ")
+
+			if isNewSection && len(evalLines) > 1 {
+				// End of section due to new section header
+				details = append(details, strings.Join(evalLines, "\n"))
+				evalLines = []string{}
+				inEvalSection = false
+			} else if strings.TrimSpace(line) == "" && len(evalLines) > 3 && !isTableLine {
+				// End of section due to empty line (but not if we're in a table)
+				details = append(details, strings.Join(evalLines, "\n"))
+				evalLines = []string{}
+				inEvalSection = false
+			} else {
+				evalLines = append(evalLines, line)
+			}
+		}
+	}
+
+	// Capture any remaining eval lines
+	if len(evalLines) > 1 {
+		details = append(details, strings.Join(evalLines, "\n"))
+	}
+
+	// Also look for specific metric summaries
+	summaryPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(total|overall|macro|micro|weighted)[^\n]*(?:f1|precision|recall|accuracy)[^\n]*`),
+		regexp.MustCompile(`(?i)samples[:\s]+\d+`),
+		regexp.MustCompile(`(?i)support[:\s]+\d+`),
+	}
+
+	for _, pattern := range summaryPatterns {
+		if matches := pattern.FindAllString(output, -1); len(matches) > 0 {
+			for _, m := range matches {
+				details = append(details, m)
+			}
+		}
+	}
+
+	if len(details) == 0 {
+		return ""
+	}
+
+	return "```\n" + strings.Join(details, "\n") + "\n```"
 }
 
 // truncateOutput returns the last N lines of output
@@ -212,8 +365,8 @@ func (a *ExperimentRunnerAgent) formatOutput(files []string, experiments []strin
 
 	output.WriteString("# Experiment Results\n\n")
 	output.WriteString("## Changes Detected\n")
-	output.WriteString(fmt.Sprintf("Modified files: %s\n", strings.Join(files, ", ")))
-	output.WriteString(fmt.Sprintf("Running experiments: %s\n\n", strings.Join(experiments, ", ")))
+	output.WriteString(summarizeChanges(files))
+	output.WriteString(fmt.Sprintf("\n**Running**: %s\n\n", strings.Join(experiments, ", ")))
 	output.WriteString("---\n\n")
 
 	for _, result := range results {
@@ -222,6 +375,36 @@ func (a *ExperimentRunnerAgent) formatOutput(files []string, experiments []strin
 	}
 
 	return output.String()
+}
+
+// summarizeChanges returns a concise summary of changed files by directory
+func summarizeChanges(files []string) string {
+	if len(files) == 0 {
+		return "No files changed\n"
+	}
+
+	// Count files by top-level directory
+	dirCounts := make(map[string]int)
+	for _, f := range files {
+		parts := strings.SplitN(f, "/", 2)
+		dir := parts[0]
+		if len(parts) > 1 {
+			dir += "/"
+		}
+		dirCounts[dir]++
+	}
+
+	// Format summary
+	var parts []string
+	for dir, count := range dirCounts {
+		if count == 1 {
+			parts = append(parts, fmt.Sprintf("%s (1 file)", dir))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (%d files)", dir, count))
+		}
+	}
+
+	return fmt.Sprintf("%d files changed: %s\n", len(files), strings.Join(parts, ", "))
 }
 
 func init() {

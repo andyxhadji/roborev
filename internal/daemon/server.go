@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/wesm/roborev/internal/agent"
 	"github.com/wesm/roborev/internal/config"
 	"github.com/wesm/roborev/internal/git"
 	"github.com/wesm/roborev/internal/storage"
@@ -37,7 +39,7 @@ func NewServer(db *storage.DB, cfg *config.Config) *Server {
 	mux.HandleFunc("/api/enqueue", s.handleEnqueue)
 	mux.HandleFunc("/api/jobs", s.handleListJobs)
 	mux.HandleFunc("/api/job/cancel", s.handleCancelJob)
-	mux.HandleFunc("/api/repos", s.handleListRepos)
+	mux.HandleFunc("/api/job/logs", s.handleGetJobLogs)
 	mux.HandleFunc("/api/review", s.handleGetReview)
 	mux.HandleFunc("/api/review/address", s.handleAddressReview)
 	mux.HandleFunc("/api/respond", s.handleAddResponse)
@@ -280,6 +282,60 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 
 type CancelJobRequest struct {
 	JobID int64 `json:"job_id"`
+}
+
+func (s *Server) handleGetJobLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	jobIDStr := r.URL.Query().Get("job_id")
+	if jobIDStr == "" {
+		writeError(w, http.StatusBadRequest, "job_id parameter required")
+		return
+	}
+
+	var jobID int64
+	if _, err := fmt.Sscanf(jobIDStr, "%d", &jobID); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job_id")
+		return
+	}
+
+	// Get the job to find the repo path
+	job, err := s.db.GetJobByID(jobID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	// Read the log file
+	logPath := agent.GetLogPath(job.RepoPath)
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		// No logs yet or file doesn't exist
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"logs":    "",
+			"job_id":  jobID,
+			"status":  string(job.Status),
+			"message": "No logs available yet",
+		})
+		return
+	}
+
+	// Return last N lines for performance
+	lines := strings.Split(string(content), "\n")
+	maxLines := 200
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs":       strings.Join(lines, "\n"),
+		"job_id":     jobID,
+		"status":     string(job.Status),
+		"total_lines": len(lines),
+	})
 }
 
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
