@@ -2181,30 +2181,43 @@ func TestTUIEmptyRefreshSeedsFromCurrentReview(t *testing.T) {
 }
 
 func TestTUICalculateColumnWidths(t *testing.T) {
+	// Test that column widths fit within terminal for usable sizes (>= 80)
+	// Narrower terminals may overflow - users should widen their terminal
 	tests := []struct {
-		name      string
-		termWidth int
-		idWidth   int
+		name           string
+		termWidth      int
+		idWidth        int
+		expectOverflow bool // true if overflow is acceptable for this width
 	}{
 		{
-			name:      "wide terminal",
-			termWidth: 200,
-			idWidth:   3,
+			name:           "wide terminal",
+			termWidth:      200,
+			idWidth:        3,
+			expectOverflow: false,
 		},
 		{
-			name:      "medium terminal",
-			termWidth: 100,
-			idWidth:   3,
+			name:           "medium terminal",
+			termWidth:      100,
+			idWidth:        3,
+			expectOverflow: false,
 		},
 		{
-			name:      "narrow terminal",
-			termWidth: 60,
-			idWidth:   3,
+			name:           "standard terminal",
+			termWidth:      80,
+			idWidth:        3,
+			expectOverflow: false,
 		},
 		{
-			name:      "minimum usable terminal",
-			termWidth: 80,
-			idWidth:   3,
+			name:           "narrow terminal - overflow acceptable",
+			termWidth:      60,
+			idWidth:        3,
+			expectOverflow: true, // Fixed columns alone need ~48 chars
+		},
+		{
+			name:           "very narrow terminal - overflow expected",
+			termWidth:      40,
+			idWidth:        3,
+			expectOverflow: true,
 		},
 	}
 
@@ -2228,11 +2241,15 @@ func TestTUICalculateColumnWidths(t *testing.T) {
 			// Plus spacing: 2 (prefix) + 7 spaces between columns
 			fixedWidth := 2 + tt.idWidth + 10 + 12 + 8 + 6 + 7
 			flexibleTotal := widths.ref + widths.repo + widths.agent
-
-			// Total width should not exceed terminal width (accounting for some margin)
 			totalWidth := fixedWidth + flexibleTotal
-			if totalWidth > tt.termWidth+5 { // Allow small margin for edge cases
+
+			if !tt.expectOverflow && totalWidth > tt.termWidth {
 				t.Errorf("total width %d exceeds terminal width %d", totalWidth, tt.termWidth)
+			}
+
+			// Even with overflow, flexible columns should be minimal
+			if tt.expectOverflow && flexibleTotal > 15 {
+				t.Errorf("narrow terminal should minimize flexible columns, got %d", flexibleTotal)
 			}
 		})
 	}

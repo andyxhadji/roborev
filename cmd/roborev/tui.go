@@ -1277,18 +1277,26 @@ func (m tuiModel) calculateColumnWidths(idWidth int) columnWidths {
 	fixedWidth := 2 + idWidth + 10 + 12 + 8 + 6 + 7
 
 	// Available width for flexible columns (ref, repo, agent)
-	availableWidth := m.width - fixedWidth
-	if availableWidth < 15 {
-		availableWidth = 15 // Absolute minimum to show anything
-	}
+	// Don't artificially inflate - if terminal is too narrow, columns will be tiny
+	availableWidth := max(3, m.width-fixedWidth) // At least 3 chars total for columns
 
 	// Distribute available width: ref (25%), repo (45%), agent (30%)
-	// Scale minimums based on available width to prevent overflow
-	refWidth := availableWidth * 25 / 100
-	repoWidth := availableWidth * 45 / 100
-	agentWidth := availableWidth * 30 / 100
+	refWidth := max(1, availableWidth*25/100)
+	repoWidth := max(1, availableWidth*45/100)
+	agentWidth := max(1, availableWidth*30/100)
 
-	// Apply minimums only if there's enough space
+	// Scale down if total exceeds available (can happen due to rounding with small values)
+	total := refWidth + repoWidth + agentWidth
+	if total > availableWidth && availableWidth > 0 {
+		refWidth = max(1, availableWidth*25/100)
+		repoWidth = max(1, availableWidth*45/100)
+		agentWidth = availableWidth - refWidth - repoWidth // Give remainder to agent
+		if agentWidth < 1 {
+			agentWidth = 1
+		}
+	}
+
+	// Apply higher minimums only when there's plenty of space
 	if availableWidth >= 35 {
 		refWidth = max(10, refWidth)
 		repoWidth = max(15, repoWidth)
@@ -1296,9 +1304,9 @@ func (m tuiModel) calculateColumnWidths(idWidth int) columnWidths {
 	}
 
 	return columnWidths{
-		ref:   max(3, refWidth),
-		repo:  max(5, repoWidth),
-		agent: max(3, agentWidth),
+		ref:   refWidth,
+		repo:  repoWidth,
+		agent: agentWidth,
 	}
 }
 
@@ -1444,7 +1452,7 @@ func (m tuiModel) renderReviewView() string {
 	b.WriteString("\n")
 
 	// Wrap text to terminal width minus padding
-	wrapWidth := min(max(40, m.width-4), 200)
+	wrapWidth := max(20, min(m.width-4, 200))
 	lines := wrapText(review.Output, wrapWidth)
 
 	visibleLines := m.height - 5 // Leave room for title and help
@@ -1486,7 +1494,7 @@ func (m tuiModel) renderPromptView() string {
 	b.WriteString("\n")
 
 	// Wrap text to terminal width minus padding
-	wrapWidth := min(max(40, m.width-4), 200)
+	wrapWidth := max(20, min(m.width-4, 200))
 	lines := wrapText(review.Prompt, wrapWidth)
 
 	visibleLines := m.height - 5 // Leave room for title and help
