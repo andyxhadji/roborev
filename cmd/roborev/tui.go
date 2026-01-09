@@ -731,12 +731,19 @@ func (m tuiModel) renderQueueView() string {
 			}
 		}
 
+		// Calculate column widths dynamically based on terminal width
+		colWidths := m.calculateColumnWidths(idWidth)
+
 		// Header (with 2-char prefix to align with row selector)
-		header := fmt.Sprintf("  %-*s %-17s %-15s %-8s %-10s %-12s %-8s %s",
-			idWidth, "ID", "Ref", "Repo", "Agent", "Status", "Queued", "Elapsed", "Addr'd")
+		header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-10s %-12s %-8s %s",
+			idWidth, "ID",
+			colWidths.ref, "Ref",
+			colWidths.repo, "Repo",
+			colWidths.agent, "Agent",
+			"Status", "Queued", "Elapsed", "Addr'd")
 		b.WriteString(tuiStatusStyle.Render(header))
 		b.WriteString("\n")
-		b.WriteString("  " + strings.Repeat("-", min(m.width-4, 80)))
+		b.WriteString("  " + strings.Repeat("-", min(m.width-4, 200)))
 		b.WriteString("\n")
 
 		// Calculate visible job range based on terminal height
@@ -768,7 +775,7 @@ func (m tuiModel) renderQueueView() string {
 		for i := start; i < end; i++ {
 			job := m.jobs[i]
 			selected := i == m.selectedIdx
-			line := m.renderJobLine(job, selected, idWidth)
+			line := m.renderJobLine(job, selected, idWidth, colWidths)
 			if selected {
 				line = tuiSelectedStyle.Render("> " + line)
 			} else {
@@ -794,17 +801,45 @@ func (m tuiModel) renderQueueView() string {
 	return b.String()
 }
 
-func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth int) string {
+type columnWidths struct {
+	ref   int
+	repo  int
+	agent int
+}
+
+func (m tuiModel) calculateColumnWidths(idWidth int) columnWidths {
+	// Fixed widths: ID (idWidth), Status (10), Queued (12), Elapsed (8), Addr'd (5)
+	// Plus spacing: 2 (prefix) + 7 spaces between columns
+	fixedWidth := 2 + idWidth + 10 + 12 + 8 + 5 + 7
+
+	// Available width for flexible columns (ref, repo, agent)
+	availableWidth := m.width - fixedWidth
+	if availableWidth < 30 {
+		availableWidth = 30 // Minimum
+	}
+
+	// Distribute available width: ref (25%), repo (45%), agent (30%)
+	return columnWidths{
+		ref:   max(10, availableWidth*25/100),
+		repo:  max(15, availableWidth*45/100),
+		agent: max(10, availableWidth*30/100),
+	}
+}
+
+func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth int, colWidths columnWidths) string {
 	ref := shortRef(job.GitRef)
+	if len(ref) > colWidths.ref {
+		ref = ref[:max(1, colWidths.ref-3)] + "..."
+	}
 
 	repo := job.RepoName
-	if len(repo) > 15 {
-		repo = repo[:12] + "..."
+	if len(repo) > colWidths.repo {
+		repo = repo[:max(1, colWidths.repo-3)] + "..."
 	}
 
 	agent := job.Agent
-	if len(agent) > 8 {
-		agent = agent[:8]
+	if len(agent) > colWidths.agent {
+		agent = agent[:max(1, colWidths.agent-3)] + "..."
 	}
 
 	// Format enqueue time as compact timestamp in local time
@@ -863,8 +898,12 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth in
 		}
 	}
 
-	return fmt.Sprintf("%-*d %-17s %-15s %-8s %s %-12s %-8s %s",
-		idWidth, job.ID, ref, repo, agent, styledStatus, enqueued, elapsed, addr)
+	return fmt.Sprintf("%-*d %-*s %-*s %-*s %s %-12s %-8s %s",
+		idWidth, job.ID,
+		colWidths.ref, ref,
+		colWidths.repo, repo,
+		colWidths.agent, agent,
+		styledStatus, enqueued, elapsed, addr)
 }
 
 // wrapText wraps text to the specified width, preserving existing line breaks
@@ -920,8 +959,8 @@ func (m tuiModel) renderReviewView() string {
 	}
 	b.WriteString("\n")
 
-	// Wrap text to terminal width (max 100 chars)
-	wrapWidth := min(m.width-2, 100)
+	// Wrap text to terminal width minus padding
+	wrapWidth := max(80, m.width-4)
 	lines := wrapText(review.Output, wrapWidth)
 
 	visibleLines := m.height - 5 // Leave room for title and help
@@ -962,8 +1001,8 @@ func (m tuiModel) renderPromptView() string {
 	}
 	b.WriteString("\n")
 
-	// Wrap text to terminal width (max 100 chars)
-	wrapWidth := min(m.width-2, 100)
+	// Wrap text to terminal width minus padding
+	wrapWidth := max(80, m.width-4)
 	lines := wrapText(review.Prompt, wrapWidth)
 
 	visibleLines := m.height - 5 // Leave room for title and help
