@@ -15,15 +15,11 @@ import (
 )
 
 // ExperimentRunnerAgent runs ML experiments based on commit changes
-type ExperimentRunnerAgent struct {
-	PythonCmd string
-}
+type ExperimentRunnerAgent struct{}
 
 // NewExperimentRunnerAgent creates a new experiment runner agent
 func NewExperimentRunnerAgent() *ExperimentRunnerAgent {
-	return &ExperimentRunnerAgent{
-		PythonCmd: "poetry",
-	}
+	return &ExperimentRunnerAgent{}
 }
 
 func (a *ExperimentRunnerAgent) Name() string {
@@ -92,7 +88,8 @@ func (a *ExperimentRunnerAgent) detectExperiments(files []string) []string {
 
 func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, experimentPath string) string {
 	// Use the context timeout from the daemon (configured via job_timeout_minutes)
-	cmd := exec.CommandContext(ctx, a.PythonCmd, "run", "python", experimentPath)
+	// Hard-coded to use "poetry run python" for ML experiment workflows
+	cmd := exec.CommandContext(ctx, "poetry", "run", "python", experimentPath)
 	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
@@ -123,6 +120,9 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 
 	// Parse metrics (look for F1, precision, recall patterns)
 	metrics := a.parseMetrics(output)
+
+	// Parse evaluation details (tables, reports, etc.)
+	evalDetails := a.parseEvaluationDetails(output)
 
 	// Format result
 	var result strings.Builder
@@ -159,6 +159,9 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 		}
 		if metrics != "" {
 			result.WriteString(fmt.Sprintf("\n### Metrics\n%s\n", metrics))
+		}
+		if evalDetails != "" {
+			result.WriteString(fmt.Sprintf("\n### Evaluation Results\n%s\n", evalDetails))
 		}
 	}
 

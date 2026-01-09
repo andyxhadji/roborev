@@ -1144,10 +1144,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiLogsMsg:
 		m.logsContent = msg.logs
 		m.logsJobID = msg.jobID
-		m.currentView = tuiViewLogs
+		// Only switch to logs view on first fetch, not on refresh
+		if m.currentView != tuiViewLogs {
+			m.currentView = tuiViewLogs
+		}
 		// Auto-scroll to bottom for live logs
 		lines := strings.Split(msg.logs, "\n")
-		visibleLines := m.height - 5
+		visibleLines := m.height - 6 // Match renderLogsView calculation
 		if len(lines) > visibleLines {
 			m.logsScroll = len(lines) - visibleLines
 		} else {
@@ -1240,9 +1243,10 @@ func (m tuiModel) renderQueueView() string {
 		colWidths := m.calculateColumnWidths(idWidth)
 
 		// Header (with 2-char prefix to align with row selector)
-		header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-10s %-12s %-8s %s",
+		header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-10s %-12s %-8s %s",
 			idWidth, "ID",
 			colWidths.ref, "Ref",
+			colWidths.message, "Message",
 			colWidths.repo, "Repo",
 			colWidths.agent, "Agent",
 			"Status", "Queued", "Elapsed", "Addr'd")
@@ -1316,27 +1320,29 @@ func (m tuiModel) renderQueueView() string {
 }
 
 type columnWidths struct {
-	ref   int
-	repo  int
-	agent int
+	ref     int
+	message int
+	repo    int
+	agent   int
 }
 
 func (m tuiModel) calculateColumnWidths(idWidth int) columnWidths {
 	// Fixed widths: ID (idWidth), Status (10), Queued (12), Elapsed (8), Addr'd (5)
-	// Plus spacing: 2 (prefix) + 7 spaces between columns
-	fixedWidth := 2 + idWidth + 10 + 12 + 8 + 5 + 7
+	// Plus spacing: 2 (prefix) + 8 spaces between columns
+	fixedWidth := 2 + idWidth + 10 + 12 + 8 + 5 + 8
 
-	// Available width for flexible columns (ref, repo, agent)
+	// Available width for flexible columns (ref, message, repo, agent)
 	availableWidth := m.width - fixedWidth
-	if availableWidth < 30 {
-		availableWidth = 30 // Minimum
+	if availableWidth < 40 {
+		availableWidth = 40 // Minimum
 	}
 
-	// Distribute available width: ref (25%), repo (45%), agent (30%)
+	// Distribute available width: ref (10%), message (50%), repo (20%), agent (20%)
 	return columnWidths{
-		ref:   max(10, availableWidth*25/100),
-		repo:  max(15, availableWidth*45/100),
-		agent: max(10, availableWidth*30/100),
+		ref:     max(7, availableWidth*10/100),
+		message: max(20, availableWidth*50/100),
+		repo:    max(10, availableWidth*20/100),
+		agent:   max(10, availableWidth*20/100),
 	}
 }
 
@@ -1344,6 +1350,11 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth in
 	ref := shortRef(job.GitRef)
 	if len(ref) > colWidths.ref {
 		ref = ref[:max(1, colWidths.ref-3)] + "..."
+	}
+
+	message := job.CommitSubject
+	if len(message) > colWidths.message {
+		message = message[:max(1, colWidths.message-3)] + "..."
 	}
 
 	repo := job.RepoName
@@ -1412,9 +1423,10 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth in
 		}
 	}
 
-	return fmt.Sprintf("%-*d %-*s %-*s %-*s %s %-12s %-8s %s",
+	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %-12s %-8s %s",
 		idWidth, job.ID,
 		colWidths.ref, ref,
+		colWidths.message, message,
 		colWidths.repo, repo,
 		colWidths.agent, agent,
 		styledStatus, enqueued, elapsed, addr)
@@ -1489,7 +1501,7 @@ func (m tuiModel) renderReviewView() string {
 	wrapWidth := max(80, m.width-4)
 	lines := wrapText(review.Output, wrapWidth)
 
-	visibleLines := m.height - 5 // Leave room for title and help
+	visibleLines := m.height - 6 // Leave room for title, commit subject, and help
 
 	start := m.reviewScroll
 	if start >= len(lines) {
@@ -1597,7 +1609,7 @@ func (m tuiModel) renderLogsView() string {
 		wrapWidth := max(80, m.width-4)
 		lines := wrapText(m.logsContent, wrapWidth)
 
-		visibleLines := m.height - 5 // Leave room for title and help
+		visibleLines := m.height - 6 // Leave room for title, commit subject, and help
 
 		start := m.logsScroll
 		if start >= len(lines) {
