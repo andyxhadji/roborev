@@ -49,6 +49,7 @@ const (
 	tuiViewReview
 	tuiViewPrompt
 	tuiViewLogs
+	tuiViewFilter
 )
 
 // repoFilterItem represents a repo in the filter modal with its review count
