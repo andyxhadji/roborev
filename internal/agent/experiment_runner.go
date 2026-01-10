@@ -110,17 +110,6 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 	output := stdout.String()
 	errOutput := stderr.String()
 
-	// Parse MLFlow URL - try direct URL first, then construct from run/experiment IDs
-	combinedOutput := output + errOutput
-	mlflowURL := a.parseMLFlowURL(combinedOutput)
-	if mlflowURL == "" {
-		runID, experimentID := a.parseMLFlowInfo(combinedOutput)
-		mlflowURL = a.constructMLFlowURL(runID, experimentID)
-	}
-
-	// Parse metrics (look for F1, precision, recall patterns)
-	metrics := a.parseMetrics(output)
-
 	// Parse evaluation details (tables, reports, etc.)
 	evalDetails := a.parseEvaluationDetails(output)
 
@@ -154,12 +143,6 @@ func (a *ExperimentRunnerAgent) runExperiment(ctx context.Context, repoPath, exp
 		}
 	} else {
 		result.WriteString("**Status**: Success\n")
-		if mlflowURL != "" {
-			result.WriteString(fmt.Sprintf("\n**MLFlow Experiment**: %s\n", mlflowURL))
-		}
-		if metrics != "" {
-			result.WriteString(fmt.Sprintf("\n### Metrics\n%s\n", metrics))
-		}
 		if evalDetails != "" {
 			result.WriteString(fmt.Sprintf("\n### Evaluation Results\n%s\n", evalDetails))
 		}
