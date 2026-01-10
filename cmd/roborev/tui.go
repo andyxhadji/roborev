@@ -1533,7 +1533,7 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth in
 		}
 	}
 
-	return fmt.Sprintf("%-*d %-*s %-*s %-*s %s %s %-12s %-8s %s",
+	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %s %-12s %-8s %s",
 		idWidth, job.ID,
 		colWidths.ref, ref,
 		colWidths.message, message,
