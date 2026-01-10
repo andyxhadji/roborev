@@ -6,6 +6,152 @@ import (
 	"time"
 )
 
+// parseVerdict extracts P (pass) or F (fail) from review output.
+// Returns "P" only if a clear pass indicator appears at the start of a line.
+// Rejects lines containing caveats like "but", "however", "except".
+func parseVerdict(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(strings.ToLower(line))
+		// Strip leading list markers (bullets, numbers, etc.)
+		trimmed = stripListMarker(trimmed)
+
+		// Check for pass indicators at start of line
+		isPass := strings.HasPrefix(trimmed, "no issues") ||
+			strings.HasPrefix(trimmed, "no findings")
+
+		if isPass {
+			// Reject if line contains caveats (check for word boundaries)
+			if hasCaveat(trimmed) {
+				continue
+			}
+			return "P"
+		}
+	}
+	return "F"
+}
+
+// stripListMarker removes leading bullet/number markers from a line
+func stripListMarker(s string) string {
+	// Handle: "- ", "* ", "1. ", "99) ", "100. ", etc.
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return s
+	}
+	// Check for bullet markers
+	if s[0] == '-' || s[0] == '*' {
+		return strings.TrimSpace(s[1:])
+	}
+	// Check for numbered lists - scan all leading digits
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			continue
+		}
+		if i > 0 && (s[i] == '.' || s[i] == ')' || s[i] == ':') {
+			return strings.TrimSpace(s[i+1:])
+		}
+		break
+	}
+	return s
+}
+
+// hasCaveat checks if the line contains contrastive words or additional sentences with issues
+func hasCaveat(s string) bool {
+	// Split on clause boundaries first, then check each clause
+	// Replace clause separators with a marker we can split on
+	normalized := s
+	normalized = strings.ReplaceAll(normalized, "—", "|")
+	normalized = strings.ReplaceAll(normalized, "–", "|")
+	normalized = strings.ReplaceAll(normalized, ";", "|")
+	normalized = strings.ReplaceAll(normalized, ". ", "|")
+	normalized = strings.ReplaceAll(normalized, "? ", "|")
+	normalized = strings.ReplaceAll(normalized, "! ", "|")
+
+	clauses := strings.Split(normalized, "|")
+	for _, clause := range clauses {
+		if checkClauseForCaveat(clause) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkClauseForCaveat checks a single clause for caveats
+func checkClauseForCaveat(clause string) bool {
+	// Normalize remaining punctuation
+	normalized := strings.ReplaceAll(clause, ",", " ")
+
+	words := strings.Fields(normalized)
+	for i, w := range words {
+		// Strip punctuation from both sides for word matching
+		w = strings.Trim(w, ".,;:!?()[]\"'")
+		// Contrastive words
+		if w == "but" || w == "however" || w == "except" {
+			return true
+		}
+		// Negative indicators that suggest problems (unless negated)
+		if w == "fail" || w == "fails" || w == "failed" || w == "failing" ||
+			w == "break" || w == "breaks" || w == "broken" ||
+			w == "crash" || w == "crashes" || w == "panic" ||
+			w == "error" || w == "errors" || w == "bug" || w == "bugs" {
+			// Check if preceded by negation within this clause
+			if isNegated(words, i) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// isNegated checks if a negative indicator at position i is preceded by a negation word
+// within the same clause. Skips common stopwords when looking back.
+// Handles double-negation: "not without errors" means errors exist, so returns false.
+func isNegated(words []string, i int) bool {
+	stopwords := map[string]bool{
+		"the": true, "a": true, "an": true,
+		"of": true, "to": true, "in": true,
+		"have": true, "has": true, "had": true,
+		"been": true, "be": true, "is": true, "are": true, "was": true, "were": true,
+		"tests": true, "test": true, "code": true, "build": true,
+	}
+	negators := map[string]bool{
+		"no": true, "not": true, "never": true, "none": true,
+		"zero": true, "0": true, "without": true,
+		"didn't": true, "didnt": true, "doesn't": true, "doesnt": true,
+		"hasn't": true, "hasnt": true, "haven't": true, "havent": true,
+		"won't": true, "wont": true, "wouldn't": true, "wouldnt": true,
+		"can't": true, "cant": true, "cannot": true,
+	}
+
+	// Look back up to 5 non-stopwords, stopping at clause boundaries
+	checked := 0
+	for j := i - 1; j >= 0 && checked < 5; j-- {
+		raw := words[j]
+		w := strings.Trim(raw, ".,;:!?()[]\"'")
+
+		// Stop at clause boundaries (words ending with sentence/clause punctuation)
+		if strings.ContainsAny(raw, ".;?!") {
+			break
+		}
+
+		if stopwords[w] {
+			continue // Skip stopwords
+		}
+		checked++
+		if negators[w] {
+			// Handle double-negation: "not without" means the problem exists
+			if w == "without" && j > 0 {
+				prev := strings.Trim(words[j-1], ".,;:!?()[]\"'")
+				if prev == "not" {
+					return false // Double-negative = problem exists
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // parseSQLiteTime parses a time string from SQLite which may be in different formats
 func parseSQLiteTime(s string) time.Time {
 	// Try RFC3339 first (what we write for started_at, finished_at)
@@ -234,7 +380,7 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 	query := `
 		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error, j.prompt, j.retry_count,
-		       r.root_path, r.name, c.subject, rv.addressed
+		       r.root_path, r.name, c.subject, rv.addressed, rv.output
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
@@ -278,14 +424,14 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 	for rows.Next() {
 		var j ReviewJob
 		var enqueuedAt string
-		var startedAt, finishedAt, workerID, errMsg, prompt sql.NullString
+		var startedAt, finishedAt, workerID, errMsg, prompt, output sql.NullString
 		var commitID sql.NullInt64
 		var commitSubject sql.NullString
 		var addressed sql.NullInt64
 
 		err := rows.Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &j.Agent, &j.Status, &enqueuedAt,
 			&startedAt, &finishedAt, &workerID, &errMsg, &prompt, &j.RetryCount,
-			&j.RepoPath, &j.RepoName, &commitSubject, &addressed)
+			&j.RepoPath, &j.RepoName, &commitSubject, &addressed, &output)
 		if err != nil {
 			return nil, err
 		}
@@ -317,6 +463,10 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 		if addressed.Valid {
 			val := addressed.Int64 != 0
 			j.Addressed = &val
+		}
+		if output.Valid {
+			verdict := parseVerdict(output.String)
+			j.Verdict = &verdict
 		}
 
 		jobs = append(jobs, j)
